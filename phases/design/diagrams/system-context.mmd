@@ -1,0 +1,95 @@
+graph TB
+    subgraph Consumer["Consumer Project (team repo)"]
+        CONFIG["agent.config.ts\ndefineFramework({ llm, skillsDir, agentsDir })"]
+        SKILLS_DIR["skills/\n  summarize.md\n  commit/\n    index.md\n    handler.ts"]
+        AGENTS_DIR["agents/\n  default.md\n  coder.md\n  coder.hooks.ts"]
+    end
+
+    subgraph CLI["@the-agent/cli"]
+        REPL["REPL\nreadline interface"]
+        DISPATCHER["SlashCommand\nDispatcher"]
+        LOADER["Framework\nLoader"]
+    end
+
+    subgraph AGENTS_PKG["@the-agent/agents"]
+        AGENT_LOADER["AgentLoader\ngray-matter parse"]
+        AGENT_REG["AgentRegistry\nget / list / register"]
+        SYS_BUILDER["SystemPrompt\nBuilder"]
+        HOOKS["Lifecycle Hooks\nbeforeTurn / afterTurn"]
+    end
+
+    subgraph SKILLS_PKG["@the-agent/skills"]
+        SKILL_LOADER["SkillLoader\ngray-matter parse"]
+        SKILL_REG["SkillRegistry\nget / list / register"]
+        INTERPOLATOR["Template\nInterpolator"]
+    end
+
+    subgraph PROVIDERS_PKG["@the-agent/providers"]
+        ANTHROPIC["AnthropicAdapter"]
+        OPENAI["OpenAIAdapter"]
+        GOOGLE["GoogleAdapter"]
+        OLLAMA["OllamaAdapter"]
+        FACTORY["createAdapter()"]
+    end
+
+    subgraph CORE_PKG["@the-agent/core"]
+        RUNTIME["RuntimeLoop\nstate machine"]
+        STATE["RuntimeState\nimmutable snapshots"]
+        CONTEXT["ContextAssembler\ntoken budget mgmt"]
+        TOOL_DISP["ToolDispatcher\nallowedTools enforcement"]
+        CACHE["CacheLayer\nLRU, sha256 keyed"]
+        MEMORY["MemoryStore\nsqlite / json-file"]
+        LOGGER["Logger\nstructured events"]
+        INTERFACES["Interfaces\nTool, Message, LLMAdapter\nAgentConfig, SkillConfig\nCompletionSignal"]
+    end
+
+    subgraph External["External Services"]
+        ANTHROPIC_API["Anthropic API"]
+        OPENAI_API["OpenAI API"]
+        GOOGLE_API["Google AI API"]
+        OLLAMA_LOCAL["Ollama (local)"]
+    end
+
+    CONFIG -->|"FrameworkConfig"| LOADER
+    SKILLS_DIR -->|"*.md files"| SKILL_LOADER
+    AGENTS_DIR -->|"*.md files"| AGENT_LOADER
+
+    LOADER --> REPL
+    LOADER --> SKILL_LOADER
+    LOADER --> AGENT_LOADER
+    LOADER --> FACTORY
+
+    REPL --> DISPATCHER
+    DISPATCHER -->|"/command"| SKILL_REG
+    REPL -->|"user message"| RUNTIME
+
+    SKILL_LOADER --> SKILL_REG
+    SKILL_LOADER --> INTERPOLATOR
+    AGENT_LOADER --> AGENT_REG
+    AGENT_LOADER --> SYS_BUILDER
+    AGENT_LOADER --> HOOKS
+
+    RUNTIME --> STATE
+    RUNTIME --> CONTEXT
+    RUNTIME --> TOOL_DISP
+    RUNTIME --> CACHE
+    RUNTIME --> MEMORY
+    RUNTIME --> LOGGER
+
+    CONTEXT -->|"Message[]"| INTERFACES
+    TOOL_DISP -->|"Tool"| INTERFACES
+
+    FACTORY --> ANTHROPIC
+    FACTORY --> OPENAI
+    FACTORY --> GOOGLE
+    FACTORY --> OLLAMA
+
+    ANTHROPIC -->|"LLMAdapter"| RUNTIME
+    OPENAI -->|"LLMAdapter"| RUNTIME
+    GOOGLE -->|"LLMAdapter"| RUNTIME
+    OLLAMA -->|"LLMAdapter"| RUNTIME
+
+    ANTHROPIC --> ANTHROPIC_API
+    OPENAI --> OPENAI_API
+    GOOGLE --> GOOGLE_API
+    OLLAMA --> OLLAMA_LOCAL

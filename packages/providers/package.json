@@ -1,0 +1,23 @@
+{
+  "name": "@the-agent/providers",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "clean": "tsc --build --clean"
+  },
+  "dependencies": {
+    "@the-agent/core": "*",
+    "@anthropic-ai/sdk": "^0.39.0",
+    "openai": "^4.0.0",
+    "@google/generative-ai": "^0.21.0"
+  }
+}
