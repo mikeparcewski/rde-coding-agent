@@ -6,7 +6,7 @@
 
 import { Type } from "@sinclair/typebox";
 import { readFile, readdir, stat } from "node:fs/promises";
-import { join, extname } from "node:path";
+import { join, extname, basename } from "node:path";
 import { execFileSync } from "node:child_process";
 import type { PiTool, PiToolResult } from "../../types.js";
 
@@ -1063,3 +1063,937 @@ function generateGitLabCIYaml(stack: {
 
   return l.join("\n");
 }
+
+// ── iac_review ────────────────────────────────────────────────────────────────
+
+interface IacFinding {
+  severity: "critical" | "high" | "medium" | "low";
+  rule: string;
+  description: string;
+  file: string;
+  line: string;
+  recommendation: string;
+}
+
+export const iacReviewTool: PiTool = {
+  name: "iac_review",
+  label: "IaC Review",
+  description:
+    "Scans Infrastructure-as-Code files (Terraform, Kubernetes, CloudFormation, Docker Compose) for security misconfigurations and policy violations.",
+  parameters: Type.Object({
+    path: Type.String({
+      description: "Directory containing IaC files to review.",
+    }),
+  }),
+
+  async execute(_id, input) {
+    const { path: dirPath } = input as { path: string };
+
+    const findings: IacFinding[] = [];
+    const iacTypes: Set<string> = new Set();
+    const scannedFiles: string[] = [];
+
+    // Walk directory recursively and collect IaC files
+    async function walkIac(dir: string): Promise<void> {
+      let entries: string[];
+      try {
+        entries = await readdir(dir);
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (["node_modules", ".git", "dist", ".terraform"].includes(entry)) continue;
+        const full = join(dir, entry);
+        const s = await stat(full).catch(() => null);
+        if (s?.isDirectory()) {
+          await walkIac(full);
+        } else if (s?.isFile()) {
+          const ext = extname(entry).toLowerCase();
+          const base = basename(entry).toLowerCase();
+
+          // Terraform
+          if (ext === ".tf") {
+            iacTypes.add("Terraform");
+            scannedFiles.push(full);
+            await checkIacFile(full, "terraform", findings);
+          }
+          // Docker Compose
+          else if (/^docker-compose.*\.ya?ml$/.test(base) || /^compose.*\.ya?ml$/.test(base)) {
+            iacTypes.add("Docker Compose");
+            scannedFiles.push(full);
+            await checkIacFile(full, "docker-compose", findings);
+          }
+          // YAML — determine type by content
+          else if (ext === ".yaml" || ext === ".yml") {
+            const content = await readFileSafe(full);
+            if (content.includes("AWSTemplateFormatVersion")) {
+              iacTypes.add("CloudFormation");
+              scannedFiles.push(full);
+              await checkIacFile(full, "cloudformation", findings);
+            } else if (content.includes("apiVersion:")) {
+              iacTypes.add("Kubernetes");
+              scannedFiles.push(full);
+              await checkIacFile(full, "kubernetes", findings);
+            }
+          }
+        }
+      }
+    }
+
+    async function checkIacFile(
+      filePath: string,
+      iacType: string,
+      out: IacFinding[],
+    ): Promise<void> {
+      const content = await readFileSafe(filePath);
+      const lines = content.split("\n");
+
+      const addFinding = (
+        severity: IacFinding["severity"],
+        rule: string,
+        description: string,
+        lineNum: number,
+        recommendation: string,
+      ) => {
+        out.push({
+          severity,
+          rule,
+          description,
+          file: filePath,
+          line: String(lineNum + 1),
+          recommendation,
+        });
+      };
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const trimmed = line.trim();
+
+        // Hardcoded secrets
+        if (/password\s*=\s*"[^"]{3,}"/.test(trimmed) || /secret\s*=\s*"[^"]{3,}"/.test(trimmed)) {
+          addFinding(
+            "critical",
+            "IAC-001",
+            "Hardcoded secret or password value",
+            i,
+            "Use a secrets manager or environment variable reference instead of hardcoded values.",
+          );
+        }
+
+        // Overly permissive IAM
+        if (
+          (/"Action"\s*:\s*"\*"/.test(trimmed) || /"Resource"\s*:\s*"\*"/.test(trimmed)) &&
+          /"Effect"\s*:\s*"Allow"/.test(content)
+        ) {
+          addFinding(
+            "critical",
+            "IAC-002",
+            'Overly permissive IAM: wildcard Action or Resource with Allow effect',
+            i,
+            'Replace wildcard "*" with specific actions and resources to follow least-privilege principle.',
+          );
+        }
+
+        // Unencrypted S3 (Terraform)
+        if (iacType === "terraform" && /resource\s+"aws_s3_bucket"/.test(trimmed)) {
+          const blockEnd = Math.min(i + 30, lines.length);
+          const block = lines.slice(i, blockEnd).join("\n");
+          if (!block.includes("server_side_encryption")) {
+            addFinding(
+              "high",
+              "IAC-003",
+              "S3 bucket missing server-side encryption configuration",
+              i,
+              "Add aws_s3_bucket_server_side_encryption_configuration resource to enable AES-256 or KMS encryption.",
+            );
+          }
+        }
+
+        // Unencrypted RDS (Terraform)
+        if (iacType === "terraform" && /resource\s+"aws_db_instance"/.test(trimmed)) {
+          const blockEnd = Math.min(i + 40, lines.length);
+          const block = lines.slice(i, blockEnd).join("\n");
+          if (!block.includes("storage_encrypted")) {
+            addFinding(
+              "high",
+              "IAC-004",
+              "RDS instance missing storage_encrypted configuration",
+              i,
+              'Set storage_encrypted = true in the aws_db_instance resource.',
+            );
+          }
+        }
+
+        // Missing resource limits (Kubernetes)
+        if (iacType === "kubernetes" && /^\s*containers:/.test(line)) {
+          const blockEnd = Math.min(i + 30, lines.length);
+          const block = lines.slice(i, blockEnd).join("\n");
+          if (!block.includes("resources:") || !block.includes("limits:")) {
+            addFinding(
+              "medium",
+              "IAC-005",
+              "Kubernetes container missing resource limits",
+              i,
+              "Add resources.limits (cpu and memory) to prevent resource starvation.",
+            );
+          }
+        }
+
+        // Exposed port 22 or 3389
+        if (/hostPort\s*:\s*(22|3389)\b/.test(trimmed) || /containerPort\s*:\s*(22|3389)\b/.test(trimmed)) {
+          addFinding(
+            "high",
+            "IAC-006",
+            `Sensitive port exposed (${trimmed.includes("22") ? "22/SSH" : "3389/RDP"})`,
+            i,
+            "Avoid exposing administrative ports directly. Use VPN or bastion host instead.",
+          );
+        }
+
+        // Listening on 0.0.0.0
+        if (/0\.0\.0\.0/.test(trimmed) && !/^\s*#/.test(trimmed)) {
+          addFinding(
+            "medium",
+            "IAC-007",
+            "Service binding to 0.0.0.0 (all interfaces)",
+            i,
+            "Bind to specific interfaces unless intentionally public-facing.",
+          );
+        }
+
+        // Missing HTTPS (Terraform load balancer)
+        if (iacType === "terraform" && /protocol\s*=\s*"HTTP"/.test(trimmed)) {
+          addFinding(
+            "high",
+            "IAC-008",
+            'Load balancer listener using HTTP instead of HTTPS',
+            i,
+            'Change protocol to "HTTPS" and configure SSL certificate.',
+          );
+        }
+
+        // CloudFormation — no deletion policy
+        if (iacType === "cloudformation" && /Type:\s*AWS::RDS|Type:\s*AWS::S3/.test(trimmed)) {
+          const blockEnd = Math.min(i + 20, lines.length);
+          const block = lines.slice(i, blockEnd).join("\n");
+          if (!block.includes("DeletionPolicy")) {
+            addFinding(
+              "low",
+              "IAC-009",
+              "CloudFormation resource missing DeletionPolicy",
+              i,
+              "Add DeletionPolicy: Retain or Snapshot to prevent accidental data loss.",
+            );
+          }
+        }
+      }
+
+      // Use rgSearch for additional pattern checks on this file
+      if (rgAvailable()) {
+        // Wildcard CIDR blocks
+        const cidrMatches = rgSearch(
+          '(?:cidr_blocks|source_ranges).*\\["0\\.0\\.0\\.0/0"\\]',
+          filePath,
+        );
+        if (cidrMatches.trim()) {
+          for (const match of cidrMatches.trim().split("\n").slice(0, 5)) {
+            const lineNum = match.split(":")[1] ?? "?";
+            out.push({
+              severity: "high",
+              rule: "IAC-010",
+              description: "Security group allows traffic from all IPs (0.0.0.0/0)",
+              file: filePath,
+              line: lineNum,
+              recommendation: "Restrict CIDR blocks to known IP ranges.",
+            });
+          }
+        }
+      }
+    }
+
+    await walkIac(dirPath);
+
+    // Build summary
+    const summary = {
+      critical: findings.filter((f) => f.severity === "critical").length,
+      high: findings.filter((f) => f.severity === "high").length,
+      medium: findings.filter((f) => f.severity === "medium").length,
+      low: findings.filter((f) => f.severity === "low").length,
+      total: findings.length,
+    };
+
+    return textResult(
+      JSON.stringify(
+        {
+          findings,
+          summary,
+          filesScanned: scannedFiles.length,
+          iacTypes: Array.from(iacTypes),
+        },
+        null,
+        2,
+      ),
+    );
+  },
+};
+
+// ── release_plan ──────────────────────────────────────────────────────────────
+
+export const releasePlanTool: PiTool = {
+  name: "release_plan",
+  label: "Release Plan",
+  description:
+    "Analyzes git commit history using conventional commits to generate a structured release plan with version suggestion, grouped changes, and contributor list.",
+  parameters: Type.Object({
+    path: Type.String({
+      description: "Git repository directory.",
+    }),
+    since: Type.Optional(
+      Type.String({
+        description: "Git tag or date to look back from (e.g., 'v1.0.0' or '2024-01-01'). Defaults to last 50 commits.",
+      }),
+    ),
+  }),
+
+  async execute(_id, input) {
+    const { path: repoPath, since } = input as { path: string; since?: string };
+
+    let rawLog: string;
+    try {
+      const args = [
+        "log",
+        "--format=%H|%s|%an|%ae|%aI",
+        since ? `${since}..HEAD` : "-50",
+      ];
+      rawLog = execFileSync("git", args, {
+        cwd: repoPath,
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (err) {
+      return textResult(
+        JSON.stringify({ error: `git log failed: ${(err as Error).message}` }),
+      );
+    }
+
+    const lines = rawLog.trim().split("\n").filter(Boolean);
+
+    interface CommitEntry {
+      hash: string;
+      subject: string;
+      author: string;
+      email: string;
+      date: string;
+      type: string;
+      scope: string;
+      message: string;
+      breaking: boolean;
+    }
+
+    const commits: CommitEntry[] = [];
+    for (const line of lines) {
+      const parts = line.split("|");
+      if (parts.length < 5) continue;
+      // Subject may contain "|", so reconstruct from the middle parts
+      const hash = parts[0];
+      const date = parts[parts.length - 1];
+      const email = parts[parts.length - 2];
+      const author = parts[parts.length - 3];
+      const subject = parts.slice(1, parts.length - 3).join("|");
+
+      // Parse conventional commit
+      const convMatch = /^(\w+)(?:\(([^)]+)\))?(!)?:\s*(.*)$/.exec(subject);
+      let type = "other";
+      let scope = "";
+      let message = subject;
+      let breaking = false;
+
+      if (convMatch) {
+        type = convMatch[1].toLowerCase();
+        scope = convMatch[2] ?? "";
+        breaking = !!convMatch[3] || subject.includes("BREAKING CHANGE");
+        message = convMatch[4];
+      }
+
+      commits.push({ hash, subject, author, email: email ?? "", date: date ?? "", type, scope, message, breaking });
+    }
+
+    // Group changes
+    const changes: Record<string, CommitEntry[]> = {
+      breaking: [],
+      features: [],
+      fixes: [],
+      docs: [],
+      chores: [],
+      other: [],
+    };
+
+    for (const c of commits) {
+      if (c.breaking) {
+        changes.breaking.push(c);
+      } else if (c.type === "feat" || c.type === "feature") {
+        changes.features.push(c);
+      } else if (c.type === "fix" || c.type === "bugfix") {
+        changes.fixes.push(c);
+      } else if (c.type === "docs" || c.type === "doc") {
+        changes.docs.push(c);
+      } else if (["chore", "ci", "build", "refactor", "test", "perf", "style"].includes(c.type)) {
+        changes.chores.push(c);
+      } else {
+        changes.other.push(c);
+      }
+    }
+
+    // Determine version bump
+    let versionSuggestion: "major" | "minor" | "patch" = "patch";
+    if (changes.breaking.length > 0) {
+      versionSuggestion = "major";
+    } else if (changes.features.length > 0) {
+      versionSuggestion = "minor";
+    }
+
+    // Collect contributors
+    const contributorMap = new Map<string, { name: string; email: string; commits: number }>();
+    for (const c of commits) {
+      const key = c.email || c.author;
+      if (contributorMap.has(key)) {
+        contributorMap.get(key)!.commits++;
+      } else {
+        contributorMap.set(key, { name: c.author, email: c.email, commits: 1 });
+      }
+    }
+
+    const formatCommits = (list: CommitEntry[]) =>
+      list.map((c) => ({
+        hash: c.hash.slice(0, 8),
+        scope: c.scope,
+        message: c.message,
+        author: c.author,
+        date: c.date,
+      }));
+
+    return textResult(
+      JSON.stringify(
+        {
+          versionSuggestion,
+          changes: {
+            breaking: formatCommits(changes.breaking),
+            features: formatCommits(changes.features),
+            fixes: formatCommits(changes.fixes),
+            docs: formatCommits(changes.docs),
+            chores: formatCommits(changes.chores),
+            other: formatCommits(changes.other),
+          },
+          contributors: Array.from(contributorMap.values()).sort((a, b) => b.commits - a.commits),
+          totalCommits: commits.length,
+          since: since ?? "last 50 commits",
+        },
+        null,
+        2,
+      ),
+    );
+  },
+};
+
+// ── error_analysis ────────────────────────────────────────────────────────────
+
+export const errorAnalysisTool: PiTool = {
+  name: "error_analysis",
+  label: "Error Analysis",
+  description:
+    "Parses log files (JSON, syslog, Apache/Nginx, application) to classify errors, count frequency, and build a timeline.",
+  parameters: Type.Object({
+    log_path: Type.String({
+      description: "File or directory containing log files.",
+    }),
+    pattern: Type.Optional(
+      Type.String({
+        description: "Additional filter pattern to narrow results.",
+      }),
+    ),
+  }),
+
+  async execute(_id, input) {
+    const { log_path, pattern } = input as { log_path: string; pattern?: string };
+
+    // Collect log files
+    const logFiles: string[] = [];
+
+    async function collectLogs(p: string): Promise<void> {
+      let s: Awaited<ReturnType<typeof stat>> | null;
+      try {
+        s = await stat(p);
+      } catch {
+        return;
+      }
+      if (s.isFile()) {
+        logFiles.push(p);
+      } else if (s.isDirectory()) {
+        const entries = await readdir(p).catch(() => [] as string[]);
+        for (const entry of entries) {
+          if (["node_modules", ".git"].includes(entry)) continue;
+          const full = join(p, entry);
+          const es = await stat(full).catch(() => null);
+          if (es?.isDirectory()) {
+            await collectLogs(full);
+          } else if (es?.isFile()) {
+            const ext = extname(entry).toLowerCase();
+            if (ext === ".log" || ext === ".txt") {
+              logFiles.push(full);
+            }
+          }
+        }
+      }
+    }
+
+    await collectLogs(log_path);
+
+    interface ErrorEntry {
+      type: string;
+      message: string;
+      count: number;
+      files: string[];
+      firstSeen?: string;
+      lastSeen?: string;
+    }
+
+    const errorMap = new Map<string, ErrorEntry>();
+    const timelineMap = new Map<string, number>();
+    let filterRe: RegExp | null = null;
+    if (pattern) {
+      try {
+        filterRe = new RegExp(pattern, "i");
+      } catch {
+        return textResult(
+          JSON.stringify({ error: `Invalid regex pattern: "${pattern}"`, errors: [], totalErrors: 0, filesAnalyzed: 0, categories: {} }),
+        );
+      }
+    }
+
+    const errorClassify = (msg: string): string => {
+      const m = msg.toLowerCase();
+      if (/timeout|timed out|deadline/.test(m)) return "timeout";
+      if (/connect|econnrefused|econnreset|network/.test(m)) return "connection";
+      if (/auth|401|403|forbidden|unauthorized|permission/.test(m)) return "auth";
+      if (/null|undefined|cannot read|typeerror/.test(m)) return "null_reference";
+      if (/oom|out of memory|heap/.test(m)) return "oom";
+      if (/disk|no space|enospc/.test(m)) return "disk";
+      if (/syntax|parse|unexpected token/.test(m)) return "parse";
+      if (/database|sql|query|transaction/.test(m)) return "database";
+      return "general";
+    };
+
+    const tsPatterns = [
+      // ISO8601
+      /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/,
+      // Common log format: [DD/Mon/YYYY:HH:MM:SS
+      /\[(\d{2}\/\w{3}\/\d{4}:\d{2}:\d{2}:\d{2})/,
+      // Syslog: Mon DD HH:MM:SS
+      /(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})/,
+    ];
+
+    function extractTimestamp(line: string): string | undefined {
+      for (const re of tsPatterns) {
+        const m = re.exec(line);
+        if (m) return m[1];
+      }
+      return undefined;
+    }
+
+    function extractHour(ts: string): string | undefined {
+      // Try to grab YYYY-MM-DDTHH or similar
+      const m = /(\d{4}-\d{2}-\d{2}[T\s](\d{2}))/.exec(ts);
+      if (m) return m[1].slice(0, 13); // YYYY-MM-DDTHH
+      return undefined;
+    }
+
+    const errorLinePatterns = [
+      // JSON logs
+      /"level"\s*:\s*"(error|fatal|critical)"/i,
+      /"severity"\s*:\s*"(ERROR|FATAL|CRITICAL)"/i,
+      // Application patterns
+      /\b(ERROR|FATAL|EXCEPTION|CRITICAL)\b/,
+      // Python traceback
+      /^Traceback|^\s+File ".+", line \d+/,
+      // Java exception
+      /Exception in thread|\.exception\b/i,
+      // HTTP 5xx
+      /\s5\d{2}\s/,
+      // Syslog
+      /\b(err|crit|alert|emerg)\b/i,
+    ];
+
+    const processedFiles = logFiles.slice(0, 50);
+    for (const logFile of processedFiles) {
+      const content = await readFileSafe(logFile);
+      if (content.startsWith("[could not read:")) continue;
+
+      const lines = content.split("\n");
+      for (const line of lines) {
+        if (!line.trim()) continue;
+
+        // Check if line matches any error pattern
+        const isError = errorLinePatterns.some((re) => re.test(line));
+        if (!isError) continue;
+
+        // Apply extra filter if provided
+        if (filterRe && !filterRe.test(line)) continue;
+
+        const ts = extractTimestamp(line);
+        const hour = ts ? extractHour(ts) : undefined;
+        if (hour) {
+          timelineMap.set(hour, (timelineMap.get(hour) ?? 0) + 1);
+        }
+
+        // Extract message
+        let message = line.trim().slice(0, 200);
+
+        // Try to extract from JSON
+        const jsonMsgMatch = /"(?:message|msg|error)"\s*:\s*"([^"]{3,})"/.exec(line);
+        if (jsonMsgMatch) message = jsonMsgMatch[1];
+
+        const errorType = errorClassify(message);
+        // Normalize key: type + first 80 chars of message
+        const key = `${errorType}::${message.slice(0, 80)}`;
+
+        if (errorMap.has(key)) {
+          const entry = errorMap.get(key)!;
+          entry.count++;
+          if (!entry.files.includes(logFile)) entry.files.push(logFile);
+          if (ts) entry.lastSeen = ts;
+        } else {
+          errorMap.set(key, {
+            type: errorType,
+            message,
+            count: 1,
+            files: [logFile],
+            firstSeen: ts,
+            lastSeen: ts,
+          });
+        }
+      }
+    }
+
+    const errors = Array.from(errorMap.values()).sort((a, b) => b.count - a.count);
+    const topErrors = errors.slice(0, 5);
+
+    const timeline = Array.from(timelineMap.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([hour, count]) => ({ hour, count }));
+
+    const categories: Record<string, number> = {};
+    for (const e of errors) {
+      categories[e.type] = (categories[e.type] ?? 0) + e.count;
+    }
+
+    const totalErrors = errors.reduce((sum, e) => sum + e.count, 0);
+
+    return textResult(
+      JSON.stringify(
+        {
+          errors,
+          timeline: timeline.length > 0 ? timeline : undefined,
+          topErrors,
+          totalErrors,
+          filesAnalyzed: processedFiles.length,
+          categories,
+        },
+        null,
+        2,
+      ),
+    );
+  },
+};
+
+// ── audit_evidence ────────────────────────────────────────────────────────────
+
+export const auditEvidenceTool: PiTool = {
+  name: "audit_evidence",
+  label: "Audit Evidence",
+  description:
+    "Scans a codebase for compliance evidence mapped to controls in SOC2, HIPAA, GDPR, or PCI frameworks.",
+  parameters: Type.Object({
+    framework: Type.Union(
+      [
+        Type.Literal("soc2"),
+        Type.Literal("hipaa"),
+        Type.Literal("gdpr"),
+        Type.Literal("pci"),
+      ],
+      { description: "Compliance framework to check against." },
+    ),
+    path: Type.String({
+      description: "Directory to scan for compliance evidence.",
+    }),
+  }),
+
+  async execute(_id, input) {
+    const { framework, path: dirPath } = input as {
+      framework: "soc2" | "hipaa" | "gdpr" | "pci";
+      path: string;
+    };
+
+    interface ControlCheck {
+      id: string;
+      name: string;
+      patterns: string[];
+    }
+
+    const frameworkControls: Record<string, ControlCheck[]> = {
+      soc2: [
+        { id: "CC6.1", name: "Authentication controls", patterns: ["auth", "login", "passport", "jwt", "oauth", "session", "mfa", "2fa"] },
+        { id: "CC6.7", name: "Encryption settings", patterns: ["encrypt", "AES", "TLS", "SSL", "https", "bcrypt", "hash"] },
+        { id: "CC7.2", name: "Logging and monitoring", patterns: ["logger", "audit", "winston", "pino", "log4j", "syslog", "monitor"] },
+        { id: "CC6.3", name: "Access control (RBAC)", patterns: ["rbac", "role", "permission", "authorize", "acl", "policy"] },
+        { id: "CC8.1", name: "Change management", patterns: ["changelog", "migration", "deploy", "release", "version"] },
+        { id: "A1.2", name: "Backup and recovery", patterns: ["backup", "snapshot", "restore", "recovery", "replica"] },
+      ],
+      hipaa: [
+        { id: "164.312(a)", name: "PHI access controls", patterns: ["auth", "patient", "phi", "hipaa", "access_control", "rbac"] },
+        { id: "164.312(e)", name: "Encryption at rest and in transit", patterns: ["encrypt", "AES", "TLS", "SSL", "kms", "at_rest"] },
+        { id: "164.312(b)", name: "Audit logging", patterns: ["audit", "logger", "access_log", "event_log", "trail"] },
+        { id: "164.308(b)", name: "BAA references", patterns: ["baa", "business_associate", "businessAssociate", "third_party"] },
+        { id: "164.530(j)", name: "Data retention policy", patterns: ["retention", "ttl", "expire", "purge", "archive"] },
+      ],
+      gdpr: [
+        { id: "Art.7", name: "Consent mechanisms", patterns: ["consent", "gdpr", "cookie", "accept", "opt_in", "optin"] },
+        { id: "Art.17", name: "Data deletion / right to forget", patterns: ["delete", "forget", "erase", "purge", "anonymize"] },
+        { id: "Art.37", name: "DPO references", patterns: ["dpo", "data_protection", "dataProtection", "privacy_officer"] },
+        { id: "Art.13", name: "Privacy policy", patterns: ["privacy", "policy", "terms", "disclosure"] },
+        { id: "Art.30", name: "Data processing records", patterns: ["processing", "lawful_basis", "lawfulBasis", "data_map", "datamap"] },
+      ],
+      pci: [
+        { id: "Req.3", name: "Card data protection", patterns: ["card", "pan", "cvv", "cardholder", "tokenize", "vault"] },
+        { id: "Req.4", name: "Encryption in transit", patterns: ["TLS", "SSL", "https", "encrypt", "tls_min"] },
+        { id: "Req.7", name: "Access control", patterns: ["rbac", "role", "permission", "least_privilege", "authorize"] },
+        { id: "Req.10", name: "Audit logging", patterns: ["audit", "logger", "access_log", "event", "trail"] },
+        { id: "Req.11", name: "Vulnerability management", patterns: ["scan", "cve", "vulnerability", "patch", "sast", "snyk"] },
+        { id: "Req.1", name: "Network segmentation", patterns: ["firewall", "vpc", "subnet", "network_policy", "ingress", "egress"] },
+      ],
+    };
+
+    const controls = frameworkControls[framework] ?? [];
+
+    interface ControlResult {
+      id: string;
+      name: string;
+      status: "found" | "missing" | "partial";
+      evidence: Array<{ file: string; line: string; snippet: string }>;
+      recommendation?: string;
+    }
+
+    const results: ControlResult[] = [];
+
+    for (const control of controls) {
+      const evidence: ControlResult["evidence"] = [];
+
+      for (const pat of control.patterns) {
+        if (!rgAvailable()) break;
+        const matches = rgSearch(pat, dirPath, ["-i", "--max-count=3"]);
+        if (matches.trim()) {
+          for (const matchLine of matches.trim().split("\n").slice(0, 3)) {
+            // format: file:linenum:content
+            const colonIdx = matchLine.indexOf(":");
+            const secondColon = matchLine.indexOf(":", colonIdx + 1);
+            if (colonIdx >= 0 && secondColon >= 0) {
+              const file = matchLine.slice(0, colonIdx);
+              const line = matchLine.slice(colonIdx + 1, secondColon);
+              const snippet = matchLine.slice(secondColon + 1).trim().slice(0, 120);
+              evidence.push({ file, line, snippet });
+            }
+          }
+        }
+        if (evidence.length >= 5) break;
+      }
+
+      let status: ControlResult["status"] = "missing";
+      if (evidence.length >= 3) {
+        status = "found";
+      } else if (evidence.length > 0) {
+        status = "partial";
+      }
+
+      const result: ControlResult = { id: control.id, name: control.name, status, evidence };
+      if (status !== "found") {
+        result.recommendation = `Search for ${control.patterns.slice(0, 3).join(", ")} patterns or add ${control.name.toLowerCase()} implementation.`;
+      }
+      results.push(result);
+    }
+
+    const summary = {
+      found: results.filter((r) => r.status === "found").length,
+      partial: results.filter((r) => r.status === "partial").length,
+      missing: results.filter((r) => r.status === "missing").length,
+      total: results.length,
+    };
+
+    const complianceScore =
+      results.length === 0
+        ? 0
+        : Math.round(((summary.found + summary.partial * 0.5) / summary.total) * 100);
+
+    return textResult(
+      JSON.stringify(
+        {
+          framework,
+          controls: results,
+          summary,
+          complianceScore,
+        },
+        null,
+        2,
+      ),
+    );
+  },
+};
+
+// ── privacy_scan ──────────────────────────────────────────────────────────────
+
+export const privacyScanTool: PiTool = {
+  name: "privacy_scan",
+  label: "Privacy Scan",
+  description:
+    "Scans a codebase for PII field references (names, emails, SSNs, credit cards, etc.) and traces their data flow (collection, storage, transmission).",
+  parameters: Type.Object({
+    path: Type.String({
+      description: "Directory to scan for PII fields and data flows.",
+    }),
+  }),
+
+  async execute(_id, input) {
+    const { path: dirPath } = input as { path: string };
+
+    interface PiiField {
+      field: string;
+      type: string;
+      locations: Array<{ file: string; line: string }>;
+      dataFlows: Array<{ direction: "collection" | "storage" | "transmission"; evidence: string }>;
+    }
+
+    const piiPatterns: Array<{ pattern: string; type: string; label: string }> = [
+      { pattern: "(?:first|last|full|user)?[_-]?name(?:Field|Value|Input)?", type: "name", label: "name" },
+      { pattern: "displayName|username|userName", type: "name", label: "displayName/username" },
+      { pattern: "email(?:Address|Field|Input)?|e_mail|e-mail", type: "email", label: "email" },
+      { pattern: "phone(?:Number|Field|Input)?|mobile|telephone|phoneNo", type: "phone", label: "phone" },
+      { pattern: "ssn|social_security|socialSecurity|social_insurance|tax_id", type: "ssn", label: "SSN/tax_id" },
+      { pattern: "dob|date_of_birth|dateOfBirth|birth_date|birthday", type: "dob", label: "date of birth" },
+      { pattern: "address|street|city|zip(?:Code)?|postal(?:Code)?", type: "address", label: "address" },
+      { pattern: "credit_card|creditCard|card_number|cardNumber|cvv|account_number", type: "financial", label: "financial" },
+      { pattern: "diagnosis|prescription|medical(?:Record)?|health(?:Data)?|patient(?:Id)?", type: "health", label: "health" },
+      { pattern: "gender|ethnicity|race|nationality|religion", type: "demographic", label: "demographic" },
+      { pattern: "ip_address|ipAddress|geolocation|gps|latitude|longitude", type: "location", label: "location" },
+    ];
+
+    const collectionPatterns = ["req\\.body", "formData", "getInput", "request\\.", "params\\.", "query\\.", "req\\.params"];
+    const storagePatterns = ["\\bsave\\b", "\\binsert\\b", "\\bcreate\\b", "\\bupdate\\b", "\\bput\\b", "\\bstore\\b", "\\bwrite\\b"];
+    const transmissionPatterns = ["\\bsend\\b", "\\bemit\\b", "\\bpost\\b", "\\bfetch\\b", "axios", "http\\.", "https\\.", "request\\("];
+
+    const piiInventory: PiiField[] = [];
+
+    if (!rgAvailable()) {
+      return textResult(
+        JSON.stringify({
+          error: "ripgrep (rg) is required for privacy_scan but was not found.",
+          piiInventory: [],
+          summary: { totalPiiFields: 0, byType: {}, flowAnalysis: { collection: 0, storage: 0, transmission: 0 } },
+          recommendations: [],
+        }),
+      );
+    }
+
+    for (const { pattern, type, label } of piiPatterns) {
+      const matches = rgSearch(pattern, dirPath, ["-i", "--max-count=20"]);
+      if (!matches.trim()) continue;
+
+      const locations: PiiField["locations"] = [];
+      for (const matchLine of matches.trim().split("\n")) {
+        const colonIdx = matchLine.indexOf(":");
+        const secondColon = matchLine.indexOf(":", colonIdx + 1);
+        if (colonIdx >= 0 && secondColon >= 0) {
+          const file = matchLine.slice(0, colonIdx);
+          const line = matchLine.slice(colonIdx + 1, secondColon);
+          locations.push({ file, line });
+        }
+      }
+
+      if (locations.length === 0) continue;
+
+      // Check data flows scoped to files where this PII field was found
+      const piiFileSet = [...new Set(locations.map((l) => l.file))].slice(0, 5);
+      const dataFlows: PiiField["dataFlows"] = [];
+
+      // Search flow patterns only in files containing this PII field
+      const searchFlowInFiles = (patterns: string[], direction: PiiField["dataFlows"][0]["direction"]): void => {
+        for (const piiFile of piiFileSet) {
+          for (const p of patterns) {
+            const m = rgSearch(p, piiFile, ["-i", "--max-count=1"]);
+            if (m.trim()) {
+              dataFlows.push({
+                direction,
+                evidence: m.trim().split("\n")[0].slice(0, 120),
+              });
+              return;
+            }
+          }
+        }
+      };
+
+      searchFlowInFiles(collectionPatterns, "collection");
+      searchFlowInFiles(storagePatterns, "storage");
+      searchFlowInFiles(transmissionPatterns, "transmission");
+
+      piiInventory.push({
+        field: label,
+        type,
+        locations: locations.slice(0, 10),
+        dataFlows,
+      });
+    }
+
+    // Summary
+    const byType: Record<string, number> = {};
+    for (const item of piiInventory) {
+      byType[item.type] = (byType[item.type] ?? 0) + item.locations.length;
+    }
+
+    const flowAnalysis = {
+      collection: piiInventory.filter((p) => p.dataFlows.some((f) => f.direction === "collection")).length,
+      storage: piiInventory.filter((p) => p.dataFlows.some((f) => f.direction === "storage")).length,
+      transmission: piiInventory.filter((p) => p.dataFlows.some((f) => f.direction === "transmission")).length,
+    };
+
+    const recommendations: string[] = [];
+    if (piiInventory.some((p) => p.type === "ssn" || p.type === "financial")) {
+      recommendations.push("Critical PII detected (SSN, financial data). Ensure data is encrypted at rest and in transit, and access is strictly controlled.");
+    }
+    if (piiInventory.some((p) => p.type === "health")) {
+      recommendations.push("Health data detected. Verify HIPAA compliance, including encryption, access controls, and audit logging.");
+    }
+    if (flowAnalysis.transmission > 0) {
+      recommendations.push("PII fields are transmitted — ensure all outbound connections use HTTPS/TLS and data is minimized.");
+    }
+    if (flowAnalysis.storage > 0) {
+      recommendations.push("PII fields are stored — confirm encryption at rest, proper retention policies, and data deletion procedures.");
+    }
+    if (piiInventory.length > 0) {
+      recommendations.push("Conduct a formal data map and privacy impact assessment (PIA) to document all PII data flows.");
+      recommendations.push("Implement field-level encryption or tokenization for highly sensitive PII fields.");
+    }
+
+    return textResult(
+      JSON.stringify(
+        {
+          piiInventory,
+          summary: {
+            totalPiiFields: piiInventory.length,
+            byType,
+            flowAnalysis,
+          },
+          recommendations,
+        },
+        null,
+        2,
+      ),
+    );
+  },
+};

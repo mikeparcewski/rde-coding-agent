@@ -5,13 +5,15 @@
  */
 
 import type { DomainRegistrar, PiExtensionAPI, ResolvedConfig } from "../../types.js";
-import { experimentDesignTool, riskAssessTool, progressReportTool } from "./tools.js";
+import { experimentDesignTool, riskAssessTool, progressReportTool, rolloutPlanTool, costAnalyzeTool } from "./tools.js";
 import { registerCommands } from "./commands.js";
 
 export const register: DomainRegistrar = (pi, _config) => {
   pi.registerTool(experimentDesignTool);
   pi.registerTool(riskAssessTool);
   pi.registerTool(progressReportTool);
+  pi.registerTool(rolloutPlanTool);
+  pi.registerTool(costAnalyzeTool);
   registerCommands(pi);
 };
 

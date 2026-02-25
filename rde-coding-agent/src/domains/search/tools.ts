@@ -400,6 +400,626 @@ export function registerSearchTools(pi: PiExtensionAPI): void {
     },
   });
 
+  // ── hotspot_analysis ──────────────────────────────────────────────────────
+
+  pi.registerTool({
+    name: "hotspot_analysis",
+    label: "Hotspot Analysis",
+    description:
+      "Find the most-referenced exported symbols in the codebase. " +
+      "Scans for exported functions, classes, types, and interfaces, then counts " +
+      "references to each. Returns a ranked list of hotspots by reference count.",
+    parameters: Type.Object({
+      paths: Type.Optional(
+        Type.Array(Type.String(), {
+          description: "Directories to scan; defaults to ['.']",
+        }),
+      ),
+      min_refs: Type.Optional(
+        Type.Number({
+          description: "Minimum reference count to include in results; default 3",
+          minimum: 1,
+        }),
+      ),
+    }),
+    async execute(
+      _id: string,
+      input: Record<string, unknown>,
+      _signal: AbortSignal,
+      _onUpdate,
+    ) {
+      const paths = (input["paths"] as string[] | undefined) ?? ["."];
+      const minRefs = (input["min_refs"] as number | undefined) ?? 3;
+
+      // Step 1: Find all exported symbol definitions
+      const exportMatches = await runRg(
+        buildRgArgs({
+          pattern: `export\\s+(?:function|class|type|interface|const|enum)\\s+(\\w+)`,
+          paths,
+          fileGlob: "**/*.{ts,tsx,js,jsx,py,java,go}",
+          caseSensitive: true,
+        }),
+      );
+
+      // Extract symbol names with their definition locations
+      interface SymbolDef {
+        symbol: string;
+        file: string;
+        line: number;
+      }
+
+      const symbolMap = new Map<string, SymbolDef>();
+      for (const m of exportMatches) {
+        // Extract the symbol name from the match
+        const match = m.content.match(
+          /export\s+(?:function|class|type|interface|const|enum)\s+(\w+)/,
+        );
+        if (match && match[1]) {
+          const sym = match[1];
+          if (!symbolMap.has(sym)) {
+            symbolMap.set(sym, { symbol: sym, file: m.file, line: m.line });
+          }
+        }
+      }
+
+      const allSymbols = [...symbolMap.values()].slice(0, 100);
+
+      // Step 2: Count references for each symbol in parallel batches of 10
+      const BATCH_SIZE = 10;
+      interface HotspotResult {
+        symbol: string;
+        definedIn: string;
+        line: number;
+        refCount: number;
+        referencedBy: string[];
+      }
+
+      const hotspots: HotspotResult[] = [];
+
+      for (let i = 0; i < allSymbols.length; i += BATCH_SIZE) {
+        const batch = allSymbols.slice(i, i + BATCH_SIZE);
+        const batchResults = await Promise.all(
+          batch.map(async (def) => {
+            const escapedSym = def.symbol.replace(
+              /[.*+?^${}()|[\]\\]/g,
+              "\\$&",
+            );
+            try {
+              const refs = await runRg(
+                buildRgArgs({
+                  pattern: `\\b${escapedSym}\\b`,
+                  paths,
+                  caseSensitive: true,
+                }),
+              );
+              const referencedBy = [...new Set(refs.map((r) => r.file))];
+              return {
+                symbol: def.symbol,
+                definedIn: def.file,
+                line: def.line,
+                refCount: refs.length,
+                referencedBy,
+              };
+            } catch {
+              return {
+                symbol: def.symbol,
+                definedIn: def.file,
+                line: def.line,
+                refCount: 0,
+                referencedBy: [] as string[],
+              };
+            }
+          }),
+        );
+        hotspots.push(...batchResults);
+      }
+
+      const filtered = hotspots
+        .filter((h) => h.refCount >= minRefs)
+        .sort((a, b) => b.refCount - a.refCount);
+
+      return {
+        type: "text" as const,
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              hotspots: filtered,
+              totalSymbols: allSymbols.length,
+              filteredCount: filtered.length,
+            }),
+          },
+        ],
+      };
+    },
+  });
+
+  // ── service_map ───────────────────────────────────────────────────────────
+
+  pi.registerTool({
+    name: "service_map",
+    label: "Service Map",
+    description:
+      "Discover services defined in Docker Compose and Kubernetes manifests. " +
+      "Parses compose files and K8s YAML to extract service names, ports, and dependencies, " +
+      "then generates a Mermaid diagram of connections.",
+    parameters: Type.Object({
+      path: Type.String({
+        description: "Project root to scan for service definition files",
+      }),
+    }),
+    async execute(
+      _id: string,
+      input: Record<string, unknown>,
+      _signal: AbortSignal,
+      _onUpdate,
+    ) {
+      const scanPath = input["path"] as string;
+
+      // Safety check on path
+      if (
+        scanPath.startsWith("/") ||
+        scanPath.startsWith("~") ||
+        scanPath.includes("..")
+      ) {
+        throw new Error(
+          `Unsafe path rejected: "${scanPath}". Paths must be relative to the working directory.`,
+        );
+      }
+
+      // Find Docker Compose files
+      const composeMatches = await runRg(
+        buildRgArgs({
+          pattern: "services:",
+          paths: [scanPath],
+          fileGlob: "**/{docker-compose,compose}*.{yml,yaml}",
+          caseSensitive: true,
+        }),
+      );
+
+      // Find K8s manifests
+      const k8sMatches = await runRg(
+        buildRgArgs({
+          pattern: "^apiVersion:",
+          paths: [scanPath],
+          fileGlob: "**/*.{yml,yaml}",
+          caseSensitive: true,
+        }),
+      );
+
+      // Collect unique files
+      const composeFiles = [...new Set(composeMatches.map((m) => m.file))];
+      const k8sFiles = [...new Set(k8sMatches.map((m) => m.file))].filter(
+        (f) => !composeFiles.includes(f),
+      );
+
+      interface ServiceInfo {
+        name: string;
+        image?: string;
+        ports: string[];
+        dependsOn: string[];
+        environment: string[];
+        source: string;
+        kind?: string;
+      }
+
+      const services: ServiceInfo[] = [];
+      const connections: Array<{ from: string; to: string; type: string }> = [];
+
+      // ── Parse Docker Compose files line-by-line ──
+      for (const composeFile of composeFiles) {
+        try {
+          const { stdout } = await execFileAsync("cat", [composeFile], {
+            maxBuffer: 2 * 1024 * 1024,
+          });
+          const lines = stdout.split("\n");
+
+          let inServicesSection = false;
+          let currentService: ServiceInfo | null = null;
+          let currentSection = "";
+
+          for (const rawLine of lines) {
+            const trimmed = rawLine.trimEnd();
+
+            if (trimmed === "services:") {
+              inServicesSection = true;
+              continue;
+            }
+
+            if (!inServicesSection) continue;
+
+            // Top-level key at indent 0 that is not services ends services section
+            if (trimmed.length > 0 && !trimmed.startsWith(" ") && !trimmed.startsWith("\t") && !trimmed.startsWith("#")) {
+              if (!trimmed.startsWith("services:")) {
+                inServicesSection = false;
+                if (currentService) services.push(currentService);
+                currentService = null;
+              }
+              continue;
+            }
+
+            // Detect service name (2-space indent, no leading dash)
+            const serviceNameMatch = trimmed.match(/^  (\w[\w-]*):\s*$/);
+            if (serviceNameMatch) {
+              if (currentService) services.push(currentService);
+              currentService = {
+                name: serviceNameMatch[1],
+                ports: [],
+                dependsOn: [],
+                environment: [],
+                source: composeFile,
+              };
+              currentSection = "";
+              continue;
+            }
+
+            if (!currentService) continue;
+
+            // Detect subsection keys at 4-space indent
+            const sectionMatch = trimmed.match(/^    (image|ports|depends_on|environment):\s*(.*)?$/);
+            if (sectionMatch) {
+              currentSection = sectionMatch[1];
+              const inlineValue = sectionMatch[2]?.trim();
+              if (currentSection === "image" && inlineValue) {
+                currentService.image = inlineValue;
+              }
+              continue;
+            }
+
+            // List items at 6-space indent
+            const listItemMatch = trimmed.match(/^      -\s+(.+)$/);
+            if (listItemMatch) {
+              const val = listItemMatch[1].trim();
+              if (currentSection === "ports") currentService.ports.push(val);
+              else if (currentSection === "depends_on") {
+                currentService.dependsOn.push(val);
+                connections.push({ from: currentService.name, to: val, type: "depends_on" });
+              } else if (currentSection === "environment") {
+                currentService.environment.push(val);
+              }
+            }
+          }
+          if (currentService) services.push(currentService);
+        } catch {
+          // skip unreadable files
+        }
+      }
+
+      // ── Parse K8s manifests line-by-line ──
+      for (const k8sFile of k8sFiles) {
+        try {
+          const { stdout } = await execFileAsync("cat", [k8sFile], {
+            maxBuffer: 2 * 1024 * 1024,
+          });
+          const lines = stdout.split("\n");
+
+          let currentKind = "";
+          let currentName = "";
+          const ports: string[] = [];
+
+          for (const rawLine of lines) {
+            const trimmed = rawLine.trim();
+
+            if (trimmed.startsWith("---")) {
+              // New document — save previous if any
+              if (currentName) {
+                services.push({
+                  name: currentName,
+                  kind: currentKind,
+                  ports,
+                  dependsOn: [],
+                  environment: [],
+                  source: k8sFile,
+                });
+              }
+              currentKind = "";
+              currentName = "";
+              ports.length = 0;
+              continue;
+            }
+
+            const kindMatch = trimmed.match(/^kind:\s+(\w+)/);
+            if (kindMatch) {
+              currentKind = kindMatch[1];
+              continue;
+            }
+
+            const nameMatch = trimmed.match(/^name:\s+(\S+)/);
+            if (nameMatch && !currentName) {
+              currentName = nameMatch[1];
+              continue;
+            }
+
+            const portMatch = trimmed.match(/^(?:containerPort|port):\s+(\d+)/);
+            if (portMatch) {
+              ports.push(portMatch[1]);
+            }
+          }
+
+          // Save last document
+          if (currentName) {
+            services.push({
+              name: currentName,
+              kind: currentKind,
+              ports: [...ports],
+              dependsOn: [],
+              environment: [],
+              source: k8sFile,
+            });
+          }
+        } catch {
+          // skip unreadable files
+        }
+      }
+
+      // ── Generate Mermaid diagram ──
+      // Build collision-free Mermaid node IDs from service names
+      const idMap = new Map<string, string>();
+      const usedIds = new Set<string>();
+      const toMermaidId = (name: string): string => {
+        if (idMap.has(name)) return idMap.get(name)!;
+        let base = name.replace(/[^a-zA-Z0-9_]/g, "_");
+        let id = base;
+        let suffix = 2;
+        while (usedIds.has(id)) {
+          id = `${base}_${suffix++}`;
+        }
+        usedIds.add(id);
+        idMap.set(name, id);
+        return id;
+      };
+
+      const mermaidLines = ["graph LR"];
+      const serviceNames = new Set(services.map((s) => s.name));
+      for (const svc of services) {
+        const id = toMermaidId(svc.name);
+        const label = svc.kind ? `${svc.name}<br/>${svc.kind}` : svc.name;
+        mermaidLines.push(`  ${id}["${label}"]`);
+      }
+      for (const conn of connections) {
+        if (serviceNames.has(conn.from) && serviceNames.has(conn.to)) {
+          mermaidLines.push(`  ${toMermaidId(conn.from)} -->|${conn.type}| ${toMermaidId(conn.to)}`);
+        }
+      }
+      const mermaidDiagram = mermaidLines.join("\n");
+
+      return {
+        type: "text" as const,
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              services,
+              connections,
+              mermaidDiagram,
+              totalServices: services.length,
+              format_counts: {
+                compose: composeFiles.length,
+                k8s: k8sFiles.length,
+              },
+            }),
+          },
+        ],
+      };
+    },
+  });
+
+  // ── doc_search ────────────────────────────────────────────────────────────
+
+  pi.registerTool({
+    name: "doc_search",
+    label: "Documentation Search",
+    description:
+      "Search documentation files (Markdown, plain text, reStructuredText, AsciiDoc) " +
+      "for a query. Returns matching snippets with surrounding context.",
+    parameters: Type.Object({
+      query: Type.String({
+        description: "Search query or pattern to find in documentation",
+      }),
+      paths: Type.Optional(
+        Type.Array(Type.String(), {
+          description: "Directories to search; defaults to current directory",
+        }),
+      ),
+      file_types: Type.Optional(
+        Type.Array(Type.String(), {
+          description:
+            "File extensions to search (without dot); defaults to ['md','txt','rst','adoc']",
+        }),
+      ),
+    }),
+    async execute(
+      _id: string,
+      input: Record<string, unknown>,
+      _signal: AbortSignal,
+      _onUpdate,
+    ) {
+      const query = input["query"] as string;
+      const paths = input["paths"] as string[] | undefined;
+      const fileTypes = (input["file_types"] as string[] | undefined) ?? [
+        "md",
+        "txt",
+        "rst",
+        "adoc",
+      ];
+
+      const fileGlob = `**/*.{${fileTypes.join(",")}}`;
+
+      const matches = await runRg(
+        buildRgArgs({
+          pattern: query,
+          paths,
+          fileGlob,
+          caseSensitive: false,
+          contextLines: 2,
+        }),
+      );
+
+      const byFile = groupByFile(matches);
+
+      return {
+        type: "text" as const,
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              matches,
+              byFile,
+              totalCount: matches.length,
+              fileCount: byFile.length,
+              query,
+            }),
+          },
+        ],
+      };
+    },
+  });
+
+  // ── impl_search ───────────────────────────────────────────────────────────
+
+  pi.registerTool({
+    name: "impl_search",
+    label: "Implementation Search",
+    description:
+      "Find code implementations related to a feature description. " +
+      "Extracts meaningful keywords from the description and searches for " +
+      "function/class/method definitions containing those keywords.",
+    parameters: Type.Object({
+      feature: Type.String({
+        description: "Description of the feature or functionality to find",
+      }),
+      paths: Type.Optional(
+        Type.Array(Type.String(), {
+          description: "Directories to search; defaults to current directory",
+        }),
+      ),
+    }),
+    async execute(
+      _id: string,
+      input: Record<string, unknown>,
+      _signal: AbortSignal,
+      _onUpdate,
+    ) {
+      const feature = input["feature"] as string;
+      const paths = input["paths"] as string[] | undefined;
+
+      // Extract meaningful keywords
+      const STOPWORDS = new Set([
+        "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+        "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
+        "that", "this", "it", "its", "as", "do", "does", "did", "have", "has",
+        "had", "will", "would", "could", "should", "may", "might", "can", "get",
+        "set", "new", "all", "any", "not", "no", "if", "use", "used", "using",
+        "how", "what", "when", "where", "which", "who", "add", "make", "create",
+      ]);
+
+      const keywords = feature
+        .toLowerCase()
+        .split(/[\s\-_./\\,;:!?()[\]{}'"]+/)
+        .filter((w) => w.length >= 3 && !STOPWORDS.has(w))
+        .slice(0, 8);
+
+      if (keywords.length === 0) {
+        return {
+          type: "text" as const,
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                candidates: [],
+                keywords,
+                totalCandidates: 0,
+              }),
+            },
+          ],
+        };
+      }
+
+      // Search for definitions matching each keyword in parallel
+      const keywordResults = await Promise.all(
+        keywords.map(async (kw) => {
+          const escapedKw = kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const [defMatches, exportMatches] = await Promise.all([
+            runRg(
+              buildRgArgs({
+                pattern: `(?:function|class|def|func)\\s+\\w*${escapedKw}\\w*`,
+                paths,
+                caseSensitive: false,
+              }),
+            ).catch(() => [] as SearchMatch[]),
+            runRg(
+              buildRgArgs({
+                pattern: `(?:export\\s+(?:default\\s+)?(?:function|class|const))\\s+\\w*${escapedKw}\\w*`,
+                paths,
+                caseSensitive: false,
+              }),
+            ).catch(() => [] as SearchMatch[]),
+          ]);
+          return { keyword: kw, matches: [...defMatches, ...exportMatches] };
+        }),
+      );
+
+      // Build candidate map: file+line -> candidate
+      interface Candidate {
+        file: string;
+        symbol: string;
+        line: number;
+        lineRange: { start: number; end: number };
+        matchedKeywords: string[];
+        score: number;
+      }
+
+      const candidateMap = new Map<string, Candidate>();
+
+      for (const { keyword, matches } of keywordResults) {
+        for (const m of matches) {
+          const key = `${m.file}:${m.line}`;
+
+          // Extract symbol name from match content
+          const symMatch = m.content.match(
+            /(?:export\s+(?:default\s+)?)?(?:function|class|def|func|const)\s+(\w+)/i,
+          );
+          const symbol = symMatch ? symMatch[1] : m.matchText;
+
+          if (candidateMap.has(key)) {
+            const existing = candidateMap.get(key)!;
+            if (!existing.matchedKeywords.includes(keyword)) {
+              existing.matchedKeywords.push(keyword);
+              existing.score += 1;
+            }
+          } else {
+            candidateMap.set(key, {
+              file: m.file,
+              symbol,
+              line: m.line,
+              lineRange: { start: Math.max(1, m.line - 2), end: m.line + 5 },
+              matchedKeywords: [keyword],
+              score: 1,
+            });
+          }
+        }
+      }
+
+      const candidates = [...candidateMap.values()].sort(
+        (a, b) => b.score - a.score,
+      );
+
+      return {
+        type: "text" as const,
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              candidates,
+              keywords,
+              totalCandidates: candidates.length,
+            }),
+          },
+        ],
+      };
+    },
+  });
+
   // ── data_lineage ──────────────────────────────────────────────────────────
 
   pi.registerTool({
@@ -443,10 +1063,10 @@ export function registerSearchTools(pi: PiExtensionAPI): void {
             caseSensitive: false,
           }),
         ),
-        // Relationship declarations
+        // Relationship declarations (JS/TS ORMs + Django + Prisma + ActiveRecord)
         runRg(
           buildRgArgs({
-            pattern: `(?:hasMany|belongsTo|hasOne|belongsToMany|references|foreignKey|ManyToOne|OneToMany|ManyToMany|OneToOne|ForeignKey|relation).*${escaped}|${escaped}.*(?:hasMany|belongsTo|hasOne|belongsToMany|references|foreignKey)`,
+            pattern: `(?:hasMany|belongsTo|hasOne|belongsToMany|references|foreignKey|ManyToOne|OneToMany|ManyToMany|OneToOne|ForeignKey|relation|models\\.\\w+Field|ForeignKey|ManyToManyField|OneToOneField|@relation|@@map|@@id|has_many|belongs_to|has_one|has_and_belongs_to_many).*${escaped}|${escaped}.*(?:hasMany|belongsTo|hasOne|belongsToMany|references|foreignKey|models\\.\\w+Field|ForeignKey|ManyToManyField|OneToOneField|@relation|has_many|belongs_to|has_one)`,
             paths,
             caseSensitive: false,
           }),

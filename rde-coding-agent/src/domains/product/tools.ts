@@ -5,7 +5,8 @@
  */
 
 import { Type } from "@sinclair/typebox";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
+import { join, basename } from "node:path";
 import type { PiTool, PiToolResult } from "../../types.js";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -775,5 +776,637 @@ export const feedbackAnalyzeTool: PiTool = {
     }
 
     return textResult(sections.join("\n"));
+  },
+};
+
+// ── onboard_guide ─────────────────────────────────────────────────────────────
+
+export const onboardGuideTool: PiTool = {
+  name: "onboard_guide",
+  label: "Onboarding Guide",
+  description:
+    "Analyzes a project directory to generate a structured onboarding guide including tech stack, entry points, directory structure, glossary, and getting-started steps.",
+  parameters: Type.Object({
+    path: Type.String({
+      description: "Project root directory to analyze.",
+    }),
+  }),
+
+  async execute(_id, input) {
+    const { path: projectPath } = input as { path: string };
+
+    // Read top-level directory entries
+    let rootEntries: string[];
+    try {
+      rootEntries = await readdir(projectPath);
+    } catch (err) {
+      return textResult(`Error reading directory: ${(err as Error).message}`);
+    }
+
+    const rootLower = rootEntries.map((e) => e.toLowerCase());
+
+    // Read key config files
+    const readmeContent = await readFileSafe(join(projectPath, "README.md"));
+    const pkgContent = await readFileSafe(join(projectPath, "package.json"));
+    const pyprojectContent = await readFileSafe(join(projectPath, "pyproject.toml"));
+    const cargoContent = await readFileSafe(join(projectPath, "Cargo.toml"));
+
+    // Parse package.json
+    let pkg: Record<string, unknown> = {};
+    if (!pkgContent.startsWith("[could not read")) {
+      try { pkg = JSON.parse(pkgContent); } catch { /* ignore */ }
+    }
+
+    const projectName = (pkg["name"] as string) ?? basename(projectPath);
+    const description = (pkg["description"] as string) ??
+      (readmeContent.startsWith("[could not read") ? "" : readmeContent.split("\n").find((l) => l.trim() && !l.startsWith("#")) ?? "");
+
+    // Detect tech stack
+    const techStack: string[] = [];
+    if (!pkgContent.startsWith("[could not read")) techStack.push("Node.js");
+    if (rootLower.includes("tsconfig.json")) techStack.push("TypeScript");
+    if (!pyprojectContent.startsWith("[could not read")) techStack.push("Python");
+    if (!cargoContent.startsWith("[could not read")) techStack.push("Rust");
+    const deps = { ...(pkg["dependencies"] as Record<string, string> ?? {}), ...(pkg["devDependencies"] as Record<string, string> ?? {}) };
+    const depNames = Object.keys(deps).join(" ").toLowerCase();
+    if (/react/.test(depNames)) techStack.push("React");
+    if (/vue/.test(depNames)) techStack.push("Vue");
+    if (/svelte/.test(depNames)) techStack.push("Svelte");
+    if (/express|fastify|koa|hapi/.test(depNames)) techStack.push("Node.js HTTP server");
+    if (/prisma|typeorm|sequelize|knex/.test(depNames)) techStack.push("ORM/DB");
+    if (/jest|vitest|mocha|jasmine/.test(depNames)) techStack.push("Testing framework");
+    if (/webpack|vite|rollup|esbuild/.test(depNames)) techStack.push("Bundler");
+    if (rootLower.includes("dockerfile")) techStack.push("Docker");
+
+    // Detect entry points
+    const entryPointCandidates = [
+      "src/index.ts", "src/main.ts", "app.ts", "server.ts",
+      "src/index.js", "src/main.js", "app.js", "server.js",
+      "main.py", "app.py", "src/main.py",
+    ];
+    const entryPoints: string[] = [];
+    for (const ep of entryPointCandidates) {
+      try {
+        await stat(join(projectPath, ep));
+        entryPoints.push(ep);
+      } catch { /* not found */ }
+    }
+
+    // Detect test setup
+    const testDirs = ["test", "tests", "__tests__", "spec", "e2e"];
+    let testDir = "";
+    for (const td of testDirs) {
+      if (rootLower.includes(td)) { testDir = td; break; }
+    }
+
+    const testConfigFiles = ["jest.config.js", "jest.config.ts", "vitest.config.ts", "vitest.config.js", "pytest.ini", "setup.cfg"];
+    let testConfigFile = "";
+    for (const tc of testConfigFiles) {
+      if (rootLower.includes(tc.toLowerCase())) { testConfigFile = tc; break; }
+    }
+
+    let testFramework = "";
+    if (/jest/.test(depNames) || rootLower.includes("jest.config.js") || rootLower.includes("jest.config.ts")) testFramework = "Jest";
+    else if (/vitest/.test(depNames) || rootLower.some((e) => e.startsWith("vitest.config"))) testFramework = "Vitest";
+    else if (/mocha/.test(depNames)) testFramework = "Mocha";
+    else if (rootLower.includes("pytest.ini") || !pyprojectContent.startsWith("[could not read")) testFramework = "pytest";
+
+    // Detect build system
+    let buildSystem = "";
+    if (rootLower.includes("webpack.config.js") || /webpack/.test(depNames)) buildSystem = "webpack";
+    else if (/vite/.test(depNames) || rootLower.includes("vite.config")) buildSystem = "vite";
+    else if (/rollup/.test(depNames)) buildSystem = "rollup";
+    else if (/esbuild/.test(depNames)) buildSystem = "esbuild";
+    else if (rootLower.includes("makefile")) buildSystem = "make";
+    else if (rootLower.includes("tsconfig.json")) buildSystem = "tsc";
+
+    // Identify key directories
+    const knownDirs: Record<string, string> = {
+      src: "Source code",
+      lib: "Library/shared code",
+      dist: "Compiled output",
+      build: "Build output",
+      test: "Tests",
+      tests: "Tests",
+      __tests__: "Tests",
+      docs: "Documentation",
+      scripts: "Utility scripts",
+      config: "Configuration files",
+      public: "Static assets",
+      assets: "Static assets",
+      components: "UI components",
+      pages: "Route/page components",
+      api: "API routes or handlers",
+      models: "Data models",
+      services: "Business logic services",
+      utils: "Utilities/helpers",
+      types: "TypeScript type definitions",
+      migrations: "Database migrations",
+    };
+
+    const directoryStructure: Record<string, string> = {};
+    for (const entry of rootEntries) {
+      let s;
+      try { s = await stat(join(projectPath, entry)); } catch { continue; }
+      if (s.isDirectory()) {
+        directoryStructure[entry] = knownDirs[entry.toLowerCase()] ?? `Directory (${entry})`;
+      }
+    }
+
+    // Key files with read order
+    type KeyFile = { path: string; purpose: string; readOrder: number };
+    const keyFiles: KeyFile[] = [];
+    let readOrder = 1;
+    if (!readmeContent.startsWith("[could not read")) {
+      keyFiles.push({ path: "README.md", purpose: "Project overview, setup instructions, usage", readOrder: readOrder++ });
+    }
+    if (!pkgContent.startsWith("[could not read")) {
+      keyFiles.push({ path: "package.json", purpose: "Dependencies, scripts, project metadata", readOrder: readOrder++ });
+    }
+    if (rootLower.includes("tsconfig.json")) {
+      keyFiles.push({ path: "tsconfig.json", purpose: "TypeScript compiler configuration", readOrder: readOrder++ });
+    }
+    for (const ep of entryPoints.slice(0, 2)) {
+      keyFiles.push({ path: ep, purpose: "Application entry point", readOrder: readOrder++ });
+    }
+    const typesDir = rootEntries.find((e) => e.toLowerCase() === "types" || e.toLowerCase() === "src");
+    if (typesDir) {
+      keyFiles.push({ path: `${typesDir}/`, purpose: "Types and core interfaces", readOrder: readOrder++ });
+    }
+
+    // Scripts from package.json
+    const scripts = (pkg["scripts"] as Record<string, string>) ?? {};
+
+    // Extract simple glossary from README headings and code
+    const glossary: Array<{ term: string; context: string }> = [];
+    if (!readmeContent.startsWith("[could not read")) {
+      const headings = readmeContent.match(/^#{1,3}\s+(.+)$/gm) ?? [];
+      for (const h of headings.slice(0, 8)) {
+        const term = h.replace(/^#+\s+/, "").trim();
+        if (term.length > 2 && term.length < 50) {
+          glossary.push({ term, context: "README section heading" });
+        }
+      }
+    }
+
+    // Getting started
+    const installCmd = scripts["install"] ?? (pkg["name"] ? "npm install" : "see README");
+    const runCmd = scripts["start"] ?? scripts["dev"] ?? scripts["serve"] ?? "see README";
+    const testCmd = scripts["test"] ?? (testFramework === "pytest" ? "pytest" : "see README");
+
+    const result = {
+      projectName,
+      description: description.slice(0, 300),
+      techStack,
+      directoryStructure,
+      keyFiles,
+      scripts,
+      testSetup: { framework: testFramework, configFile: testConfigFile, testDir },
+      buildSystem,
+      entryPoints,
+      glossary,
+      gettingStarted: {
+        install: installCmd,
+        run: runCmd,
+        test: testCmd,
+      },
+    };
+
+    return textResult(JSON.stringify(result, null, 2));
+  },
+};
+
+// ── a11y_audit ────────────────────────────────────────────────────────────────
+
+export const a11yAuditTool: PiTool = {
+  name: "a11y_audit",
+  label: "Accessibility Audit",
+  description:
+    "Audits HTML, JSX, and TSX files for WCAG 2.1 Level AA accessibility violations and returns a compliance score with grouped issues.",
+  parameters: Type.Object({
+    path: Type.String({
+      description: "File or directory containing HTML/JSX/TSX files to audit.",
+    }),
+  }),
+
+  async execute(_id, input) {
+    const { path: auditPath } = input as { path: string };
+
+    // Recursively find HTML/JSX/TSX files
+    async function findFiles(p: string): Promise<string[]> {
+      const results: string[] = [];
+      let s;
+      try { s = await stat(p); } catch { return results; }
+      if (s.isFile()) {
+        if (/\.(html?|jsx|tsx)$/.test(p)) results.push(p);
+        return results;
+      }
+      let entries: string[];
+      try { entries = await readdir(p); } catch { return results; }
+      for (const entry of entries) {
+        const full = join(p, entry);
+        let es;
+        try { es = await stat(full); } catch { continue; }
+        if (es.isDirectory() && !entry.startsWith(".") && entry !== "node_modules" && entry !== "dist" && entry !== "build") {
+          results.push(...await findFiles(full));
+        } else if (/\.(html?|jsx|tsx)$/.test(entry)) {
+          results.push(full);
+        }
+      }
+      return results;
+    }
+
+    const files = await findFiles(auditPath);
+    if (files.length === 0) {
+      return textResult(JSON.stringify({
+        complianceScore: 100,
+        issues: [],
+        summary: { total: 0, byLevel: { A: 0, AA: 0 }, byCriterion: {} },
+        filesAudited: [],
+      }, null, 2));
+    }
+
+    type A11yIssue = {
+      criterion: string;
+      level: "A" | "AA";
+      description: string;
+      file: string;
+      line: number;
+      recommendation: string;
+    };
+
+    const issues: A11yIssue[] = [];
+    let totalChecks = 0;
+    let checksPassed = 0;
+
+    for (const file of files) {
+      const content = await readFileSafe(file);
+      if (content.startsWith("[could not read")) continue;
+      const lines = content.split("\n");
+      const isHtml = /\.html?$/.test(file);
+      const isJsx = /\.(jsx|tsx)$/.test(file);
+
+      // Track heading levels for hierarchy check
+      const headingLevels: number[] = [];
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const lineNum = i + 1;
+
+        // 1.1.1 Non-text Content — images without alt
+        if (/<img\b/i.test(line)) {
+          totalChecks++;
+          if (!/\balt\s*=/i.test(line)) {
+            issues.push({
+              criterion: "1.1.1",
+              level: "A",
+              description: "<img> element missing alt attribute",
+              file,
+              line: lineNum,
+              recommendation: "Add alt=\"descriptive text\" or alt=\"\" for decorative images.",
+            });
+          } else {
+            checksPassed++;
+          }
+        }
+
+        // 1.3.1 Info and Relationships — inputs without labels
+        if (/<input\b(?![^>]*type\s*=\s*["']?(?:hidden|submit|button|reset))/i.test(line) ||
+            /<select\b/i.test(line)) {
+          totalChecks++;
+          if (!/(?:aria-label|aria-labelledby)\s*=/i.test(line)) {
+            // Check nearby lines for <label
+            const nearby = lines.slice(Math.max(0, i - 3), i + 3).join(" ");
+            if (!/(?:<label\b|for\s*=)/i.test(nearby)) {
+              issues.push({
+                criterion: "1.3.1",
+                level: "A",
+                description: "Form input/select without associated label or aria-label",
+                file,
+                line: lineNum,
+                recommendation: "Add aria-label, aria-labelledby, or a <label> element associated via for/id.",
+              });
+            } else {
+              checksPassed++;
+            }
+          } else {
+            checksPassed++;
+          }
+        }
+
+        // 1.3.1 — heading hierarchy
+        const headingMatch = line.match(/<h([1-6])\b/i);
+        if (headingMatch) {
+          totalChecks++;
+          const level = parseInt(headingMatch[1]);
+          headingLevels.push(level);
+          if (headingLevels.length > 1) {
+            const prev = headingLevels[headingLevels.length - 2];
+            if (level > prev + 1) {
+              issues.push({
+                criterion: "1.3.1",
+                level: "A",
+                description: `Heading level skipped: h${prev} followed by h${level}`,
+                file,
+                line: lineNum,
+                recommendation: `Use h${prev + 1} instead of h${level} to maintain hierarchy.`,
+              });
+            } else {
+              checksPassed++;
+            }
+          } else {
+            checksPassed++;
+          }
+        }
+
+        // 3.1.1 Language of Page — missing lang attribute
+        if (isHtml && /<html\b/i.test(line)) {
+          totalChecks++;
+          if (!/\blang\s*=/i.test(line)) {
+            issues.push({
+              criterion: "3.1.1",
+              level: "A",
+              description: "<html> element missing lang attribute",
+              file,
+              line: lineNum,
+              recommendation: "Add lang=\"en\" (or appropriate locale) to the <html> element.",
+            });
+          } else {
+            checksPassed++;
+          }
+        }
+
+        // 1.4.3 Contrast — inline hard-coded colors
+        if (/(?:color|background-color)\s*:\s*#[0-9a-fA-F]{3,6}/i.test(line)) {
+          totalChecks++;
+          // Flag potential low-contrast colors (light grays)
+          const colorMatch = line.match(/color\s*:\s*(#[0-9a-fA-F]{3,6})/i);
+          if (colorMatch) {
+            const hex = colorMatch[1].replace("#", "");
+            const expanded = hex.length === 3
+              ? hex.split("").map((c) => c + c).join("")
+              : hex;
+            const r = parseInt(expanded.slice(0, 2), 16);
+            const g = parseInt(expanded.slice(2, 4), 16);
+            const b = parseInt(expanded.slice(4, 6), 16);
+            const luminance = (r + g + b) / 3;
+            if (luminance > 180) {
+              issues.push({
+                criterion: "1.4.3",
+                level: "AA",
+                description: `Potentially low-contrast inline color: ${colorMatch[1]}`,
+                file,
+                line: lineNum,
+                recommendation: "Verify contrast ratio meets WCAG AA (4.5:1 for normal text). Use a contrast checker.",
+              });
+            } else {
+              checksPassed++;
+            }
+          } else {
+            checksPassed++;
+          }
+        }
+
+        // 4.1.2 Name, Role, Value — ARIA misuse
+        if (/\brole\s*=\s*["'][^"']*["']/i.test(line)) {
+          totalChecks++;
+          const emptyAriaLabel = /aria-label\s*=\s*["']\s*["']/i.test(line);
+          if (emptyAriaLabel) {
+            issues.push({
+              criterion: "4.1.2",
+              level: "A",
+              description: "Empty aria-label attribute provides no accessible name",
+              file,
+              line: lineNum,
+              recommendation: "Provide a meaningful value for aria-label or remove it.",
+            });
+          } else {
+            checksPassed++;
+          }
+        }
+
+        // 2.1.1 Keyboard — onClick without keyboard handler on non-button elements
+        if (isJsx && /onClick\s*=/i.test(line)) {
+          const isButton = /<button\b|<a\b|<input\b/i.test(line);
+          if (!isButton) {
+            totalChecks++;
+            const hasKeyHandler = /onKey(?:Down|Press|Up)\s*=/i.test(line);
+            if (!hasKeyHandler) {
+              // Check nearby lines
+              const nearby = lines.slice(Math.max(0, i - 1), i + 2).join(" ");
+              if (!/onKey(?:Down|Press|Up)\s*=/i.test(nearby)) {
+                issues.push({
+                  criterion: "2.1.1",
+                  level: "A",
+                  description: "onClick handler on non-interactive element without keyboard equivalent",
+                  file,
+                  line: lineNum,
+                  recommendation: "Add onKeyDown/onKeyPress handler or use a <button> element instead.",
+                });
+              } else {
+                checksPassed++;
+              }
+            } else {
+              checksPassed++;
+            }
+          }
+        }
+      }
+    }
+
+    // Calculate compliance score (100% if no checkable elements found — no violations)
+    const complianceScore = totalChecks > 0
+      ? Math.round((checksPassed / totalChecks) * 100)
+      : 100;
+
+    // Group by criterion and level
+    const byCriterion: Record<string, number> = {};
+    const byLevel = { A: 0, AA: 0 };
+    for (const issue of issues) {
+      byCriterion[issue.criterion] = (byCriterion[issue.criterion] ?? 0) + 1;
+      byLevel[issue.level]++;
+    }
+
+    return textResult(JSON.stringify({
+      complianceScore,
+      issues,
+      summary: {
+        total: issues.length,
+        byLevel,
+        byCriterion,
+      },
+      filesAudited: files,
+    }, null, 2));
+  },
+};
+
+// ── competitive_analyze ───────────────────────────────────────────────────────
+
+export const competitiveAnalyzeTool: PiTool = {
+  name: "competitive_analyze",
+  label: "Competitive Analysis",
+  description:
+    "Generates a structured competitive analysis framework with SWOT, comparison dimensions, and competitor profile templates.",
+  parameters: Type.Object({
+    product: Type.String({
+      description: "Your product name or description.",
+    }),
+    competitors: Type.Array(Type.String(), {
+      description: "List of competitor names to analyze against.",
+      minItems: 1,
+    }),
+  }),
+
+  async execute(_id, input) {
+    const { product, competitors } = input as {
+      product: string;
+      competitors: string[];
+    };
+
+    const swot = {
+      strengths: {
+        questions: [
+          `What does ${product} do better than any competitor?`,
+          "What unique features or capabilities does your product have?",
+          "What is your core technology advantage?",
+          "What is your pricing advantage?",
+          "What is your distribution or go-to-market advantage?",
+          "What data or network effects do you have?",
+          "What is your brand or reputation advantage?",
+        ],
+      },
+      weaknesses: {
+        questions: [
+          `Where does ${product} fall short compared to competitors?`,
+          "What features are you missing that competitors have?",
+          "Where is your technical debt highest?",
+          "What customer segments do you struggle to serve?",
+          "What is your biggest operational inefficiency?",
+          "Where is your developer experience weakest?",
+          "What is your biggest support or reliability challenge?",
+        ],
+      },
+      opportunities: {
+        questions: [
+          "What market segments are underserved by all competitors?",
+          "What emerging technology trends could you leverage first?",
+          "What regulatory changes could benefit your approach?",
+          "Which competitor customers are most dissatisfied?",
+          "What adjacent markets could you expand into?",
+          "What partnerships could accelerate your growth?",
+          "What pricing model changes could unlock new customers?",
+        ],
+      },
+      threats: {
+        questions: [
+          "Which competitor is growing fastest and why?",
+          "What well-funded newcomers could disrupt the space?",
+          "What platform risk do you have (API dependencies, app stores)?",
+          "What regulatory risk could impact your product?",
+          "How quickly could a large incumbent replicate your core value?",
+          "What talent or hiring challenges threaten your roadmap?",
+          "What economic conditions would most harm your customer base?",
+        ],
+      },
+    };
+
+    const comparisonDimensions = [
+      {
+        dimension: "Feature completeness",
+        description: "Breadth and depth of features relative to customer needs",
+        evaluationCriteria: ["Core use case coverage", "Edge case handling", "Power user features", "Feature discoverability"],
+      },
+      {
+        dimension: "Pricing model",
+        description: "How pricing aligns with customer value and budget cycles",
+        evaluationCriteria: ["Entry price point", "Scalability of pricing", "Free tier / trial", "Enterprise pricing"],
+      },
+      {
+        dimension: "Target audience",
+        description: "Who the product is designed for and serves best",
+        evaluationCriteria: ["Company size fit", "Technical sophistication required", "Industry verticals", "Buyer persona"],
+      },
+      {
+        dimension: "Platform / ecosystem",
+        description: "Integrations, marketplace, and technology platform depth",
+        evaluationCriteria: ["Native integrations count", "API quality", "Marketplace/extensions", "Platform lock-in"],
+      },
+      {
+        dimension: "Developer experience",
+        description: "Quality of APIs, SDKs, docs, and onboarding for technical users",
+        evaluationCriteria: ["API design quality", "SDK coverage", "Documentation quality", "Time to first value"],
+      },
+      {
+        dimension: "Community / support",
+        description: "Community size, support quality, and ecosystem resources",
+        evaluationCriteria: ["Community size", "Response time", "Self-service resources", "Professional services"],
+      },
+      {
+        dimension: "Performance / reliability",
+        description: "Uptime, latency, and scalability track record",
+        evaluationCriteria: ["Published SLA", "Historical uptime", "Scalability ceiling", "Disaster recovery"],
+      },
+      {
+        dimension: "Integration capabilities",
+        description: "Ability to connect with existing customer toolchains",
+        evaluationCriteria: ["Number of integrations", "Integration depth", "Webhook/event support", "Custom integration ease"],
+      },
+    ];
+
+    const competitorProfiles = competitors.map((competitor) => ({
+      name: competitor,
+      analysisTemplate: {
+        positioning: {
+          theirTagline: `[Research: How does ${competitor} describe itself?]`,
+          primaryValueProp: `[Research: What is ${competitor}'s primary value proposition?]`,
+          targetSegment: `[Research: Who is ${competitor}'s primary target customer?]`,
+        },
+        differentiation: {
+          whereTheyExcelVsUs: `[List areas where ${competitor} outperforms ${product}]`,
+          whereWeExcelVsThem: `[List areas where ${product} outperforms ${competitor}]`,
+          uniqueCapabilities: `[List capabilities unique to ${competitor} not available elsewhere]`,
+        },
+        overlap: {
+          sharedCustomerSegments: `[Identify customer segments both ${product} and ${competitor} target]`,
+          featureOverlap: `[List features both products share]`,
+          competitiveWins: `[Where do you tend to win deals against ${competitor}?]`,
+          competitiveLosses: `[Where do you tend to lose deals to ${competitor}?]`,
+        },
+        intelligence: {
+          recentMoves: `[Research: What has ${competitor} launched or announced recently?]`,
+          fundingAndGrowth: `[Research: What is ${competitor}'s funding status and growth trajectory?]`,
+          customerSentiment: `[Research: What do customers say about ${competitor} on G2, Capterra, etc.?]`,
+        },
+      },
+    }));
+
+    const positioningQuestions = [
+      `Why would a customer choose ${product} over any of: ${competitors.join(", ")}?`,
+      `What is the one-sentence pitch that differentiates ${product}?`,
+      "What customer problem does only your product solve?",
+      "What would make a customer switch from a competitor to your product today?",
+      "What would make a customer switch away from your product?",
+      `If ${competitors[0] ?? "a competitor"} copied your top feature tomorrow, what would you do?`,
+    ];
+
+    const differentiationDimensions = [
+      "Build vs Buy — custom development vs turnkey solution",
+      "Open source vs proprietary",
+      "Cloud vs on-premise vs hybrid deployment",
+      "Single-tenant vs multi-tenant",
+      "Vertical-specific vs horizontal platform",
+      "Self-serve vs sales-led motion",
+      "API-first vs UI-first product philosophy",
+    ];
+
+    return textResult(JSON.stringify({
+      product,
+      competitors,
+      swot,
+      comparisonDimensions,
+      competitorProfiles,
+      positioningQuestions,
+      differentiationDimensions,
+    }, null, 2));
   },
 };

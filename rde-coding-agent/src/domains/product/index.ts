@@ -10,6 +10,9 @@ import {
   uxReviewTool,
   acceptanceCriteriaTool,
   feedbackAnalyzeTool,
+  onboardGuideTool,
+  a11yAuditTool,
+  competitiveAnalyzeTool,
 } from "./tools.js";
 import { registerCommands } from "./commands.js";
 
@@ -18,6 +21,9 @@ export const register: DomainRegistrar = (pi, _config) => {
   pi.registerTool(uxReviewTool);
   pi.registerTool(acceptanceCriteriaTool);
   pi.registerTool(feedbackAnalyzeTool);
+  pi.registerTool(onboardGuideTool);
+  pi.registerTool(a11yAuditTool);
+  pi.registerTool(competitiveAnalyzeTool);
   registerCommands(pi);
 };
 

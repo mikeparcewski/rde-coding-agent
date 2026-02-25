@@ -6,7 +6,7 @@
  */
 
 import type { DomainRegistrar, PiExtensionAPI, ResolvedConfig } from "../../types.js";
-import { securityScanTool, complianceCheckTool, ciCdReviewTool, incidentTriageTool, ciGenerateTool } from "./tools.js";
+import { securityScanTool, complianceCheckTool, ciCdReviewTool, incidentTriageTool, ciGenerateTool, iacReviewTool, releasePlanTool, errorAnalysisTool, auditEvidenceTool, privacyScanTool } from "./tools.js";
 import { registerCommands } from "./commands.js";
 import { registerHooks } from "./hooks.js";
 
@@ -16,6 +16,11 @@ export const register: DomainRegistrar = (pi, config) => {
   pi.registerTool(ciCdReviewTool);
   pi.registerTool(incidentTriageTool);
   pi.registerTool(ciGenerateTool);
+  pi.registerTool(iacReviewTool);
+  pi.registerTool(releasePlanTool);
+  pi.registerTool(errorAnalysisTool);
+  pi.registerTool(auditEvidenceTool);
+  pi.registerTool(privacyScanTool);
   registerCommands(pi);
   registerHooks(pi, config.guardrails);
 };
