@@ -1,5 +1,5 @@
 {
-  "name": "wicked-agent",
+  "name": "rde-coding-agent",
   "version": "0.1.0",
   "type": "module",
   "main": "./dist/index.js",

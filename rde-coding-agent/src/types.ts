@@ -1,5 +1,5 @@
 /**
- * Shared types for the wicked-agent pi-mono extension.
+ * Shared types for the rde-coding-agent pi-mono extension.
  *
  * We define the pi-mono extension API surface as interfaces here
  * so the package compiles independently. At runtime, pi-mono
@@ -29,10 +29,10 @@ export type DomainName = (typeof DOMAIN_NAMES)[number];
 
 // ── Configuration ──
 
-export interface WickedConfig {
+export interface RdeConfig {
   /** Which capability domains to enable. Defaults to "all". */
   capabilities?: "all" | DomainName[];
-  /** Base path for persistent stores. Defaults to ~/.pi/agent/wicked */
+  /** Base path for persistent stores. Defaults to ~/.pi/agent/rde */
   storePath?: string;
   /** Enable security gate hooks (platform domain). Defaults to true. */
   guardrails?: boolean;

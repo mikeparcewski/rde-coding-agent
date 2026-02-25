@@ -1,17 +1,17 @@
-# Architecture: wicked-agent
+# Architecture: rde-coding-agent
 
 **Date**: 2026-02-25
 **Status**: Design / Review
-**Scope**: npm package `wicked-agent` — a pi-mono extension that brings all wicked-garden
+**Scope**: npm package `rde-coding-agent` — a pi-mono extension that brings all wicked-garden
 capabilities to any pi-mono agent
 
 ---
 
 ## 1. Overview
 
-`wicked-agent` is a single npm package. It installs into `~/.pi/agent/extensions/` (global) or
+`rde-coding-agent` is a single npm package. It installs into `~/.pi/agent/extensions/` (global) or
 `.pi/extensions/` (project-local) and registers itself with pi-mono on startup via the extension
-factory function `wickedAgent(config)`.
+factory function `rdeCodingAgent(config)`.
 
 The package maps one-to-one onto the existing wicked-garden capability taxonomy: engineering, qe,
 platform, product, data, search, delivery, agentic, memory, brainstorm, project, and kanban. Each
@@ -20,7 +20,7 @@ pi-mono's extension API.
 
 The architecture has three structural priorities:
 
-1. **Additive only** — `wickedAgent(config)` registers only the domains you select. Nothing is
+1. **Additive only** — `rdeCodingAgent(config)` registers only the domains you select. Nothing is
    loaded that is not configured. A user who wants only `memory` and `search` gets exactly those.
 2. **pi-mono native** — Tools use TypeBox schemas (pi-mono's validation layer), commands use
    `pi.registerCommand`, hooks use `pi.on`. No custom runtime is introduced.
@@ -32,13 +32,13 @@ The architecture has three structural priorities:
 ## 2. Package Structure
 
 ```
-wicked-agent/
+rde-coding-agent/
 ├── package.json
 ├── tsconfig.json
 ├── src/
-│   ├── index.ts                    # public entry: export { wickedAgent }
-│   ├── extension.ts                # wickedAgent() factory
-│   ├── types.ts                    # WickedConfig, DomainName, shared types
+│   ├── index.ts                    # public entry: export { rdeCodingAgent }
+│   ├── extension.ts                # rdeCodingAgent() factory
+│   ├── types.ts                    # RdeConfig, DomainName, shared types
 │   │
 │   ├── domains/
 │   │   ├── engineering/
@@ -108,17 +108,17 @@ wicked-agent/
 
 ```typescript
 // src/index.ts
-export { wickedAgent } from "./extension.js";
-export type { WickedConfig, DomainName } from "./types.js";
+export { rdeCodingAgent } from "./extension.js";
+export type { RdeConfig, DomainName } from "./types.js";
 ```
 
 Users drop one file into their extensions directory:
 
 ```typescript
 // ~/.pi/agent/extensions/wicked.ts
-import { wickedAgent } from "wicked-agent";
+import { rdeCodingAgent } from "rde-coding-agent";
 
-export default wickedAgent({
+export default rdeCodingAgent({
   capabilities: "all",
   storePath: "~/.pi/agent/wicked",
 });
@@ -148,7 +148,7 @@ export const DomainNameSchema = Type.Union([
 ]);
 export type DomainName = Static<typeof DomainNameSchema>;
 
-export interface WickedConfig {
+export interface RdeConfig {
   // "all" or an explicit list of domains to activate
   capabilities: "all" | DomainName[];
   // base directory for all persistent stores; defaults to ~/.pi/agent/wicked
@@ -166,7 +166,7 @@ export interface PiExtension {
   register(pi: PiContext): void | Promise<void>;
 }
 
-// Minimal pi-mono context surface used by wicked-agent
+// Minimal pi-mono context surface used by rde-coding-agent
 // (pi-mono provides the real implementation at runtime)
 export interface PiContext {
   registerTool(def: ToolDef): void;
@@ -215,7 +215,7 @@ export interface StreamSimpleOptions {
 
 ```typescript
 // src/extension.ts
-import type { WickedConfig, PiExtension, PiContext, DomainName } from "./types.js";
+import type { RdeConfig, PiExtension, PiContext, DomainName } from "./types.js";
 import { resolveStorePath, expandHome } from "./store/base-store.js";
 import { registerEngineering } from "./domains/engineering/index.js";
 import { registerQe } from "./domains/qe/index.js";
@@ -254,17 +254,17 @@ const DOMAIN_REGISTRARS: Record<DomainName, DomainRegistrar> = {
 export type DomainRegistrar = (
   pi: PiContext,
   storePath: string,
-  config: WickedConfig
+  config: RdeConfig
 ) => void | Promise<void>;
 
-export function wickedAgent(config: WickedConfig): PiExtension {
+export function rdeCodingAgent(config: RdeConfig): PiExtension {
   const domains: DomainName[] =
     config.capabilities === "all" ? ALL_DOMAINS : config.capabilities;
 
   const storePath = expandHome(config.storePath ?? "~/.pi/agent/wicked");
 
   return {
-    name: "wicked-agent",
+    name: "rde-coding-agent",
     version: "1.0.0",
 
     async register(pi: PiContext): Promise<void> {
@@ -276,7 +276,7 @@ export function wickedAgent(config: WickedConfig): PiExtension {
           await registrar(pi, storePath, config);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
-          console.warn(`[wicked-agent] Failed to register domain "${domain}": ${message}`);
+          console.warn(`[rde-coding-agent] Failed to register domain "${domain}": ${message}`);
         }
       }
     },
@@ -296,14 +296,14 @@ registers slash commands, and `index.ts` wires them to pi-mono.
 ```typescript
 // src/domains/engineering/index.ts
 import type { PiContext } from "../../types.js";
-import type { WickedConfig } from "../../types.js";
+import type { RdeConfig } from "../../types.js";
 import { registerEngineeringTools } from "./tools.js";
 import { registerEngineeringCommands } from "./commands.js";
 
 export async function registerEngineering(
   pi: PiContext,
   storePath: string,
-  config: WickedConfig
+  config: RdeConfig
 ): Promise<void> {
   registerEngineeringTools(pi);
   registerEngineeringCommands(pi);
@@ -1707,12 +1707,12 @@ function isExecError(err: unknown): err is { code: number } {
 
 ## 11. Architecture Layer Map (Five-Layer Model)
 
-| Layer | wicked-agent responsibility |
+| Layer | rde-coding-agent responsibility |
 |---|---|
 | **1. Cognition** | Tool `execute()` functions gather raw data (file content, search results); the LLM in the next turn reasons over it. Brainstorm personas are explicit cognition sub-agents. |
 | **2. Context** | The `context` hook injects memory and project state before every LLM call. `MemoryStore` and `ProjectStore` are the persistent context backends. |
 | **3. Interaction** | Every domain exposes `pi.registerTool` and `pi.registerCommand` surfaces. All external I/O (filesystem, rg, git) is confined to tool `execute()` functions. |
-| **4. Runtime** | pi-mono owns the runtime loop. `wickedAgent(config)` is additive — it only registers; it does not manage sessions, turns, or retries. |
+| **4. Runtime** | pi-mono owns the runtime loop. `rdeCodingAgent(config)` is additive — it only registers; it does not manage sessions, turns, or retries. |
 | **5. Governance** | Platform domain's `tool_call` hook is the confirmation gate. `platformGuardrails: true` in config activates it. The `ctx.ui.confirm()` call provides human-in-the-loop for destructive tools. |
 
 ---
@@ -1721,9 +1721,9 @@ function isExecError(err: unknown): err is { code: number } {
 
 ```typescript
 // ~/.pi/agent/extensions/wicked.ts
-import { wickedAgent } from "wicked-agent";
+import { rdeCodingAgent } from "rde-coding-agent";
 
-export default wickedAgent({
+export default rdeCodingAgent({
   // Activate specific domains
   capabilities: ["engineering", "qe", "memory", "brainstorm", "project", "kanban"],
 
@@ -1742,9 +1742,9 @@ For teams that want everything:
 
 ```typescript
 // ~/.pi/agent/extensions/wicked.ts
-import { wickedAgent } from "wicked-agent";
+import { rdeCodingAgent } from "rde-coding-agent";
 
-export default wickedAgent({
+export default rdeCodingAgent({
   capabilities: "all",
   storePath: "~/.pi/agent/wicked",
 });
@@ -1756,16 +1756,16 @@ export default wickedAgent({
 
 ### D1 — Factory function, not class instantiation
 
-`wickedAgent(config)` returns a plain `PiExtension` object. pi-mono calls `register(pi)` once at
+`rdeCodingAgent(config)` returns a plain `PiExtension` object. pi-mono calls `register(pi)` once at
 startup. There is no singleton state on the extension object itself — state lives in the store
 modules. This makes the extension testable in isolation: pass a mock `PiContext` and assert what
 was registered.
 
 ### D2 — TypeBox, not Zod
 
-The existing `the-agent` monorepo uses Zod. `wicked-agent` uses TypeBox because that is pi-mono's
+The existing `the-agent` monorepo uses Zod. `rde-coding-agent` uses TypeBox because that is pi-mono's
 native schema layer. There is no interoperability problem: the two packages are independent. Users
-who run both tools have Zod in `the-agent` and TypeBox in `wicked-agent`, which is fine because
+who run both tools have Zod in `the-agent` and TypeBox in `rde-coding-agent`, which is fine because
 they are loaded into separate runtimes.
 
 ### D3 — JSONL for memory, JSON for project/kanban
@@ -1784,18 +1784,18 @@ synthesised. `streamSimple` returns `Promise<string>` — clean, composable, tim
 
 ### D5 — Domain failures are isolated
 
-In `wickedAgent.register()`, each domain registrar is wrapped in try/catch. A misconfigured or
+In `rdeCodingAgent.register()`, each domain registrar is wrapped in try/catch. A misconfigured or
 broken domain logs a warning and the rest of the extension continues loading. A user who enables
 `"all"` domains but has a broken store path for `project` still gets the other eleven domains.
 
 ### D6 — Context injection is additive, not replacing
 
 The `context` hook calls `injectSystemMessage()` — it adds a labelled block to the LLM context. It
-does not replace the agent's system prompt. This means wicked-agent works with any pi-mono agent
+does not replace the agent's system prompt. This means rde-coding-agent works with any pi-mono agent
 persona without modification.
 
-### D7 — No tool timeout management in wicked-agent
+### D7 — No tool timeout management in rde-coding-agent
 
-pi-mono manages per-tool timeouts at the runtime layer. `wicked-agent` does not implement its own
+pi-mono manages per-tool timeouts at the runtime layer. `rde-coding-agent` does not implement its own
 timeout wrapping on tool `execute()` calls (except for the brainstorm persona sub-calls, which are
-explicitly user-facing latency boundaries that wicked-agent controls).
+explicitly user-facing latency boundaries that rde-coding-agent controls).

@@ -1,5 +1,5 @@
 /**
- * Tests for the wickedAgent() factory (extension.ts).
+ * Tests for the rdeCodingAgent() factory (extension.ts).
  *
  * Verifies selective domain loading, fault isolation, and config defaults.
  * Domain registrars are NOT mocked — the real ones run against a mock PiContext.
@@ -18,7 +18,7 @@ vi.mock("node:fs/promises", () => ({
   mkdir: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { wickedAgent } from "../src/extension.js";
+import { rdeCodingAgent } from "../src/extension.js";
 import { DOMAIN_NAMES } from "../src/types.js";
 
 // ── Helper: mock pi with accessible maps ──────────────────────────────────────
@@ -45,20 +45,20 @@ function makeMockPi() {
   return { pi, tools, commands, hooks };
 }
 
-describe("wickedAgent() factory", () => {
+describe("rdeCodingAgent() factory", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
   it("returns a function that accepts PiExtensionAPI", () => {
-    const register = wickedAgent();
+    const register = rdeCodingAgent();
     expect(typeof register).toBe("function");
   });
 
   describe("capabilities: 'all' (default)", () => {
     it("registers tools from all 14 domains", () => {
       const { pi } = makeMockPi();
-      const register = wickedAgent({ capabilities: "all" });
+      const register = rdeCodingAgent({ capabilities: "all" });
       register(pi);
 
       // Every domain should have registered at least one tool
@@ -67,7 +67,7 @@ describe("wickedAgent() factory", () => {
 
     it("registerTool is called for each domain at least once", () => {
       const { pi } = makeMockPi();
-      const register = wickedAgent({ capabilities: "all" });
+      const register = rdeCodingAgent({ capabilities: "all" });
       register(pi);
 
       // Check specific known tools from several different domains
@@ -78,7 +78,7 @@ describe("wickedAgent() factory", () => {
 
     it("registers hooks for memory and platform domains", () => {
       const { pi } = makeMockPi();
-      const register = wickedAgent({ capabilities: "all", guardrails: true });
+      const register = rdeCodingAgent({ capabilities: "all", guardrails: true });
       register(pi);
 
       // Memory domain registers session_start, context, session_shutdown
@@ -92,7 +92,7 @@ describe("wickedAgent() factory", () => {
   describe("selective capabilities", () => {
     it("registers only the selected domains", () => {
       const { pi } = makeMockPi();
-      const register = wickedAgent({ capabilities: ["memory", "search"] });
+      const register = rdeCodingAgent({ capabilities: ["memory", "search"] });
       register(pi);
 
       expect(pi._tools.has("remember")).toBe(true);    // memory
@@ -107,7 +107,7 @@ describe("wickedAgent() factory", () => {
 
     it("registers only brainstorm tools when only brainstorm selected", () => {
       const { pi } = makeMockPi();
-      const register = wickedAgent({ capabilities: ["brainstorm"] });
+      const register = rdeCodingAgent({ capabilities: ["brainstorm"] });
       register(pi);
 
       expect(pi._tools.has("brainstorm")).toBe(true);
@@ -119,7 +119,7 @@ describe("wickedAgent() factory", () => {
 
     it("does not register tool_call hook when platform is not selected", () => {
       const { pi } = makeMockPi();
-      const register = wickedAgent({ capabilities: ["memory", "search"] });
+      const register = rdeCodingAgent({ capabilities: ["memory", "search"] });
       register(pi);
 
       expect(pi._hooks.has("tool_call")).toBe(false);
@@ -127,7 +127,7 @@ describe("wickedAgent() factory", () => {
 
     it("context assembler registers session_start even without memory domain", () => {
       const { pi } = makeMockPi();
-      const register = wickedAgent({ capabilities: ["search"] });
+      const register = rdeCodingAgent({ capabilities: ["search"] });
       register(pi);
 
       // Context assembler always registers session_start for project detection
@@ -141,7 +141,7 @@ describe("wickedAgent() factory", () => {
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
       // Both memory and search should register without errors
-      const register = wickedAgent({
+      const register = rdeCodingAgent({
         capabilities: ["memory", "search"],
       });
       register(pi);
@@ -155,7 +155,7 @@ describe("wickedAgent() factory", () => {
     it("factory does not throw even when capabilities list is empty", () => {
       const { pi } = makeMockPi();
       expect(() => {
-        const register = wickedAgent({ capabilities: [] });
+        const register = rdeCodingAgent({ capabilities: [] });
         register(pi);
       }).not.toThrow();
       expect(pi._tools.size).toBe(0);
@@ -166,7 +166,7 @@ describe("wickedAgent() factory", () => {
     it("defaults to guardrails: true (tool_call hook registered)", () => {
       const { pi } = makeMockPi();
       // No guardrails option specified -> defaults to true
-      const register = wickedAgent({ capabilities: ["platform"] });
+      const register = rdeCodingAgent({ capabilities: ["platform"] });
       register(pi);
 
       expect(pi._hooks.has("tool_call")).toBe(true);
@@ -174,7 +174,7 @@ describe("wickedAgent() factory", () => {
 
     it("guardrails: false does not register tool_call hook", () => {
       const { pi } = makeMockPi();
-      const register = wickedAgent({
+      const register = rdeCodingAgent({
         capabilities: ["platform"],
         guardrails: false,
       });
@@ -187,7 +187,7 @@ describe("wickedAgent() factory", () => {
       const { pi } = makeMockPi();
       // Should not throw even with no storePath
       expect(() => {
-        const register = wickedAgent({ capabilities: ["memory"] });
+        const register = rdeCodingAgent({ capabilities: ["memory"] });
         register(pi);
       }).not.toThrow();
     });
@@ -195,7 +195,7 @@ describe("wickedAgent() factory", () => {
     it("storePath with tilde is expanded to absolute path (no error)", () => {
       const { pi } = makeMockPi();
       expect(() => {
-        const register = wickedAgent({
+        const register = rdeCodingAgent({
           capabilities: ["memory"],
           storePath: "~/custom/path",
         });
@@ -209,7 +209,7 @@ describe("wickedAgent() factory", () => {
     it("all 14 DOMAIN_NAMES have a corresponding registrar", () => {
       const { pi } = makeMockPi();
       // Register all 14 domains
-      const register = wickedAgent({ capabilities: "all" });
+      const register = rdeCodingAgent({ capabilities: "all" });
       register(pi);
 
       // We expect DOMAIN_NAMES.length domains to have been attempted
@@ -227,7 +227,7 @@ describe("wickedAgent() factory", () => {
       const { pi } = makeMockPi();
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-      const register = wickedAgent({ capabilities: "all" });
+      const register = rdeCodingAgent({ capabilities: "all" });
       register(pi);
 
       // No domain registration warnings
@@ -237,7 +237,7 @@ describe("wickedAgent() factory", () => {
 
     it("registers tools from all expected domains including scenarios and patch", () => {
       const { pi } = makeMockPi();
-      const register = wickedAgent({ capabilities: "all" });
+      const register = rdeCodingAgent({ capabilities: "all" });
       register(pi);
 
       // Original 12 domains
@@ -257,7 +257,7 @@ describe("wickedAgent() factory", () => {
 
     it("registers slash commands from scenarios and patch domains", () => {
       const { pi } = makeMockPi();
-      const register = wickedAgent({ capabilities: "all" });
+      const register = rdeCodingAgent({ capabilities: "all" });
       register(pi);
 
       expect(pi._commands.has("/scenario")).toBe(true);
@@ -275,7 +275,7 @@ describe("wickedAgent() factory", () => {
         getModel: mockGetModel,
       };
 
-      const register = wickedAgent({ capabilities: ["brainstorm"] });
+      const register = rdeCodingAgent({ capabilities: ["brainstorm"] });
       register(pi);
 
       // brainstorm tool should be registered

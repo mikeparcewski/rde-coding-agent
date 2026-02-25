@@ -1,9 +1,9 @@
-# Strategy Gate Assessment: wicked-agent Design Phase
+# Strategy Gate Assessment: rde-coding-agent Design Phase
 
 **Date**: 2026-02-25
 **Phase**: design → implementation
 **Evaluator**: value-orchestrator
-**Architecture document**: phases/design/wicked-agent-architecture.md (1,801 lines)
+**Architecture document**: phases/design/rde-coding-agent-architecture.md (1,801 lines)
 
 ---
 
@@ -34,7 +34,7 @@ Proceed to implementation.
 
 ### AC-1: Install and Run
 
-Architecture specifies: `wickedAgent(config)` returns a `PiExtension` object with a `register(pi)`
+Architecture specifies: `rdeCodingAgent(config)` returns a `PiExtension` object with a `register(pi)`
 method. Extension drops into `.pi/extensions/wicked.ts`. The factory pattern matches pi-mono's
 documented extension loading (via jiti, no pre-compilation needed).
 
@@ -128,7 +128,7 @@ Section 7 (Platform domain hooks) shows the complete `tool_call` hook implementa
 - `GUARDED_TOOLS` set defines which tools require confirmation
 - `ctx.ui.confirm()` called before guarded tool runs
 - Throwing from the hook cancels execution
-- Controlled by `platformGuardrails: true` in `WickedConfig`
+- Controlled by `platformGuardrails: true` in `RdeConfig`
 
 **Verdict**: Addressed. Blocking gate mechanism shown with concrete code.
 
@@ -174,7 +174,7 @@ The file tree in Section 2 is clean and internally consistent:
 - One `index.ts` per domain — clean public/private boundary
 - `tools.ts`, `commands.ts`, `hooks.ts`, `store.ts` per domain — single-responsibility
 - Shared infrastructure in `store/base-store.ts`, `jsonl-store.ts`, `json-store.ts`
-- Single public entry point: `src/index.ts` exports only `wickedAgent` and two types
+- Single public entry point: `src/index.ts` exports only `rdeCodingAgent` and two types
 
 No circular dependencies exist in the proposed structure (domains import from `store/` and
 `types.ts`, never from each other). The `extension.ts` factory imports domain registrars but
@@ -238,7 +238,7 @@ The schema can be inferred from the tool parameters. Implementation is straightf
 
 The architecture is strongly and correctly additive:
 
-| Layer | pi-mono owns | wicked-agent does |
+| Layer | pi-mono owns | rde-coding-agent does |
 |---|---|---|
 | Agent loop | pi-mono | Nothing |
 | Provider adapters | pi-mono | Nothing |
@@ -251,11 +251,11 @@ The architecture is strongly and correctly additive:
 
 Key validation: The architecture document introduces no custom runtime, no additional event loop,
 no in-process HTTP server, no background threads. The brainstorm domain's use of `pi.ai` is the
-only place wicked-agent reaches into pi-mono's AI layer, and it does so through the documented
+only place rde-coding-agent reaches into pi-mono's AI layer, and it does so through the documented
 public API (`streamSimple`), not by monkey-patching or reaching into internals.
 
 Design Decision D2 is notable: the architecture explicitly calls out that `the-agent` monorepo
-uses Zod while `wicked-agent` uses TypeBox because pi-mono uses TypeBox natively. This is the
+uses Zod while `rde-coding-agent` uses TypeBox because pi-mono uses TypeBox natively. This is the
 correct call and demonstrates awareness of the integration boundary.
 
 **Verdict**: The design builds on top of pi-mono correctly. No reinvention detected.
@@ -290,7 +290,7 @@ to `MemoryEntry[]` to make the context hook deduplication logic consistent.
 
 ## Evidence
 
-- Architecture reviewed: `/Users/michael.parcewski/Projects/the-agent/phases/design/wicked-agent-architecture.md` (1,801 lines, all sections read)
+- Architecture reviewed: `/Users/michael.parcewski/Projects/the-agent/phases/design/rde-coding-agent-architecture.md` (1,801 lines, all sections read)
 - Clarify deliverables reviewed: `objective.md`, `acceptance-criteria.md`
 - Prior value gate reviewed: `clarify/value-gate-20260225-000000.md` (conditions 1 and 2 confirmed resolved)
 - Artifact: `L3:qe:strategy-gate`

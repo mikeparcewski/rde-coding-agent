@@ -1,5 +1,5 @@
 /**
- * wickedAgent() — the pi-mono extension factory.
+ * rdeCodingAgent() — the pi-mono extension factory.
  *
  * Returns a PiExtension object. pi-mono calls register(pi) once at startup.
  * Each domain is wrapped in try/catch so a broken domain never prevents the
@@ -9,7 +9,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
-  WickedConfig,
+  RdeConfig,
   PiExtensionAPI,
   ResolvedConfig,
   DomainName,
@@ -65,8 +65,8 @@ function expandHome(p: string): string {
 
 // ── Config resolver ────────────────────────────────────────────────────────────
 
-function resolveConfig(config?: WickedConfig): ResolvedConfig {
-  const rawPath = config?.storePath ?? "~/.pi/agent/wicked";
+function resolveConfig(config?: RdeConfig): ResolvedConfig {
+  const rawPath = config?.storePath ?? "~/.pi/agent/rde";
   const storePath = expandHome(rawPath);
 
   const capabilities: Set<DomainName> =
@@ -86,17 +86,17 @@ function resolveConfig(config?: WickedConfig): ResolvedConfig {
 // ── Factory ────────────────────────────────────────────────────────────────────
 
 /**
- * Create a wicked-agent pi-mono extension.
+ * Create an rde-coding-agent pi-mono extension.
  *
  * @example
  * ```typescript
- * // ~/.pi/agent/extensions/wicked.ts
- * import { wickedAgent } from "wicked-agent";
- * export default wickedAgent({ capabilities: "all" });
+ * // ~/.pi/agent/extensions/rde.ts
+ * import { rdeCodingAgent } from "rde-coding-agent";
+ * export default rdeCodingAgent({ capabilities: "all" });
  * ```
  */
-export function wickedAgent(
-  config?: WickedConfig,
+export function rdeCodingAgent(
+  config?: RdeConfig,
 ): (pi: PiExtensionAPI) => void {
   const resolved = resolveConfig(config);
 
@@ -119,7 +119,7 @@ export function wickedAgent(
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.warn(
-          `[wicked-agent] Failed to register domain "${domain}": ${message}`,
+          `[rde-coding-agent] Failed to register domain "${domain}": ${message}`,
         );
       }
     }
