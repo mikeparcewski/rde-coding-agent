@@ -2,19 +2,16 @@
   "name": "the-agent",
   "private": true,
   "workspaces": [
-    "packages/*"
+    "rde-coding-agent"
   ],
   "scripts": {
-    "build": "tsc --build",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "lint": "eslint packages/*/src",
-    "clean": "tsc --build --clean"
+    "build": "npm run build --workspace=rde-coding-agent",
+    "test": "npm run test --workspace=rde-coding-agent",
+    "clean": "npm run clean --workspace=rde-coding-agent"
   },
   "devDependencies": {
     "typescript": "^5.4.0",
     "vitest": "^1.6.0",
-    "@types/node": "^20.0.0",
-    "eslint": "^8.0.0"
+    "@types/node": "^20.0.0"
   }
 }
