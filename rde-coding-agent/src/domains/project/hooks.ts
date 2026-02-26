@@ -24,7 +24,7 @@ export function registerProjectHooks(
   // session_start: load active project based on .pi/project file
   pi.on("session_start", async (event, ctx) => {
     const startEvent = event as { cwd?: string };
-    const cwd = startEvent.cwd ?? ctx.session.cwd;
+    const cwd = startEvent.cwd ?? ctx.session?.cwd ?? process.cwd();
 
     const projectId = await detectProjectId(cwd);
     if (!projectId) {

@@ -33,8 +33,8 @@ export function registerMemoryHooks(
   // session_start: identify current project and pre-fetch relevant memories
   pi.on("session_start", async (event, ctx) => {
     const startEvent = event as { sessionId?: string; cwd?: string };
-    const sessionId = startEvent.sessionId ?? ctx.session.id;
-    const cwd = startEvent.cwd ?? ctx.session.cwd;
+    const sessionId = startEvent.sessionId ?? ctx.session?.id ?? "unknown";
+    const cwd = startEvent.cwd ?? ctx.session?.cwd ?? process.cwd();
 
     const projectId = await detectProjectId(cwd);
     const primeMemories = await store.recall("", {
